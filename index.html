@@ -29,7 +29,14 @@
 <main id="scope">
   <section class="stage">
     <div class="canvas-wrap">
-      <div class="whatif" id="whatif" hidden>Hypothetical — what would happen without this safeguard</div>
+      <div class="toolbar">
+        <span class="tb-label">Switch interconnect</span>
+        <div class="seg" role="group" aria-label="Switch interconnect mode" id="modeSeg">
+          <button type="button" data-mode="mlag" aria-pressed="true">MLAG peer-link</button>
+          <button type="button" data-mode="indep" aria-pressed="false">Independent · L2 via core1</button>
+        </div>
+      </div>
+      <div class="whatif" id="whatif" hidden>Hypothetical</div>
       <svg id="topo" viewBox="0 0 1000 704" role="img" aria-labelledby="topoTitle">
         <title id="topoTitle">Two OpenShift nodes, each with a four-member OVS balance-slb bond. eno1 and eno2 connect to sw1, eno3 and eno4 connect to sw2. sw1 and sw2 are an MLAG pair uplinked to core1.</title>
         <g id="static"></g>
@@ -41,6 +48,7 @@
         <span><i class="dot k-garp"></i>Gratuitous ARP</span>
         <span><i class="dot k-rarp"></i>RARP</span>
         <span><i class="dot k-mig"></i>Migration copy</span>
+        <span><i class="sq"></i>Pod network (node MAC via br-ex)</span>
         <span><i class="mk ok">✓</i>Accepted</span>
         <span><i class="mk drop">✕</i>Dropped</span>
         <span><i class="act"></i>Active member (only member that accepts broadcast)</span>
@@ -77,6 +85,7 @@
         <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
       </label>
       <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause after each step</span></label>
+      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · restart after 1.5 s</span></label>
     </div>
   </section>
 
@@ -90,7 +99,8 @@
         <h3>Model assumptions</h3>
         <ul>
           <li><span class="mono">br-ex</span>, <span class="mono">br-int</span> and the patch ports are collapsed into one "local" port on <span class="mono">br-phy</span>, the bridge that owns the SLB bond in the Red Hat topology.</li>
-          <li>sw1/sw2 are drawn with one MLAG-synchronised MAC table. All 8 host-facing ports are individual VLAN trunks (not an MLAG port-channel), so floods reach every member.</li>
+          <li><b>MLAG peer-link</b> mode draws sw1/sw2 with one synchronised MAC table and core1 sees the pair as a single port-channel. <b>Independent</b> mode removes the peer-link: each switch and core1 learn on their own, and every cross-switch frame transits core1. In both modes the 8 host-facing ports are individual VLAN trunks, so floods reach every member.</li>
+          <li>The <b>pods</b> square stands for all Kubernetes pod-network traffic on the node: OVN-Kubernetes sends it through <span class="mono">br-ex</span> with the node's MAC, so it is one MAC → one bucket → one member, never balanced.</li>
           <li>Hash bucket assignments (vm-web → eno2 on Node A, eno3 on Node B) are illustrative; the real bucket is <span class="mono">hash(src MAC, VLAN)</span> into 256 entries and is assigned arbitrarily on first use.</li>
           <li>Active member is eno1 on both nodes (first member enabled). OVS only names it deterministically "by accident"; check with <span class="mono">ovs-appctl bond/show</span>.</li>
           <li>Timeline is compressed: animation time is not wall-clock. The clock shows real elapsed time.</li>
