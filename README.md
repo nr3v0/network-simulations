@@ -6,15 +6,19 @@ Interactive, browser-based simulations of network behaviour. Each simulation is 
 
 - SLB Scope: https://nr3v0.github.io/network-simulations/ovs-balance-slb/
 - LACP Scope: https://nr3v0.github.io/network-simulations/ovs-lacp-balance-tcp/
+- AB Scope: https://nr3v0.github.io/network-simulations/ovs-active-backup/
+- XOR Scope: https://nr3v0.github.io/network-simulations/kernel-balance-xor/
 
 | Folder | Simulation |
 |---|---|
 | [`ovs-lacp-balance-tcp/`](ovs-lacp-balance-tcp/) | **LACP Scope** — the same topology with an 802.3ad `balance-tcp` bond: per-flow hashing, migration as a single port-channel MAC move, rebalances invisible to the switches, and the LACP-specific failure modes (un-negotiated day 0, MLAG peer-link loss → two LACP systems, slow timers, elephant flows). |
+| [`ovs-active-backup/`](ovs-active-backup/) | **AB Scope** — OVS `active-backup`: one active member, backups drop all received traffic, RARP burst and MAC moves on every failover, failover into a dead backup, `bond-primary` flapping, RARP-only announcement, and the kernel active-backup variant. Lifecycle run with a selectable number of failovers. |
+| [`kernel-balance-xor/`](kernel-balance-xor/) | **XOR Scope** — Linux kernel `balance-xor` (mode 2) under `br-ex` with a static port-channel (OVS has no such mode). layer2 vs layer3+4 hash policies, modulo remapping on link loss, undetected dead paths, and the plain-ports misconfiguration (MAC flapping, quadruplicated broadcasts, bridges learning their own VMs behind the bond). |
 | [`ovs-balance-slb/`](ovs-balance-slb/) | **SLB Scope** — MAC learning on an Open vSwitch `balance-slb` bond across 4 ports / 2 switches during VM live migration: cold start, happy path, every complication from the OVS bonding docs, member failover, and a lifecycle run (migrate → hash rebalance ×N → migrate back). Toggle MLAG peer-link vs. independent switches, step through frames Raft-visualization style, and watch per-node FDBs and switch MAC tables update. |
 
 ## Running locally
 
 ```sh
 python3 -m http.server 8765
-# open http://127.0.0.1:8765/  (landing page linking both simulations)
+# open http://127.0.0.1:8765/  (landing page linking all simulations)
 ```

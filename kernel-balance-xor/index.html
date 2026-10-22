@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>XOR Scope — Linux kernel balance-xor (mode 2) MAC learning during VM live migration</title>
+<meta name="description" content="Step-through visualization of a Linux kernel balance-xor (mode 2) bond under OVS br-ex across two MLAG switches and four slaves during VM live migration, including the failure modes of a static port-channel." />
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="./base.css" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<a class="skip" href="#scope">Skip to visualization</a>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="16" r="4" fill="currentColor"/><path d="M16 3v6M16 23v6M3 16h6M23 16h6" stroke="currentColor" stroke-width="2"/></svg>
+    <div>
+      <div class="brand-name">XOR Scope</div>
+      <div class="brand-sub">Linux kernel bond <span class="mono">balance-xor</span> (mode 2) under br-ex · MAC learning during VM live migration · <a href="../">all simulations</a></div>
+    </div>
+  </div>
+  <nav class="scen" id="scenarios" aria-label="Scenarios"></nav>
+</header>
+
+<main id="scope">
+  <section class="transport" aria-label="Playback controls">
+    <div class="toolbar">
+        <span class="tb-label">Switches</span>
+        <div class="seg" role="group" aria-label="Switch interconnect mode" id="modeSeg">
+          <button type="button" data-mode="mlag" aria-pressed="true">Static port-channel (MLAG)</button>
+          <button type="button" data-mode="indep" aria-pressed="false">Plain ports (no LAG)</button>
+        </div>
+        <label class="sel"><span>Hash</span><select id="hashSel" aria-label="Transmit hash policy"><option value="l2" selected>layer2</option><option value="l34">layer3+4</option></select></label>
+        <label class="sel" id="lifeOpt" hidden><span>Failovers</span>
+          <select id="nreb" aria-label="Number of link failovers before the second migration"><option value="0">0</option><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option></select>
+        </label>
+      </div>
+
+    <div class="btns">
+      <button id="prev" class="ib" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z"/></svg></button>
+      <button id="play" class="ib main" aria-label="Play" title="Play / pause (space)"><svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4l13 8-13 8z"/></svg></button>
+      <button id="next" class="ib" aria-label="Next step" title="Next step (→)"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
+      <button id="restart" class="ib" aria-label="Restart scenario" title="Restart"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v5h5"/></svg></button>
+    </div>
+    <div class="track-wrap">
+      <div class="track" id="track"></div>
+      <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Timeline" />
+    </div>
+    <div class="opts">
+      <label class="sel"><span>Speed</span>
+        <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+      </label>
+      <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause each step</span></label>
+      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · 1.5 s</span></label>
+    </div>
+  </section>
+  <section class="stage">
+    <div class="canvas-wrap">
+      <div class="whatif" id="whatif" hidden>Hypothetical</div>
+      <svg id="topo" viewBox="0 0 1000 704" role="img" aria-labelledby="topoTitle">
+        <title id="topoTitle">Two OpenShift nodes, each with a four-slave Linux kernel balance-xor bond under br-ex. eno1 and eno2 connect to sw1, eno3 and eno4 connect to sw2. sw1 and sw2 are an MLAG pair with a static port-channel per node, uplinked to core1.</title>
+        <g id="static"></g>
+        <g id="dyn"></g>
+      </svg>
+      <div class="legend" aria-label="Legend">
+        <span><i class="dot k-uni"></i>Unicast</span>
+        <span><i class="dot k-bcast"></i>ARP broadcast</span>
+        <span><i class="dot k-garp"></i>Gratuitous ARP</span>
+        <span><i class="dot k-rarp"></i>RARP</span>
+        <span><i class="dot k-mig"></i>Migration copy</span>
+        <span><i class="sq"></i>Pod network (node MAC via br-ex)</span>
+        <span><i class="mk ok">✓</i>Accepted</span>
+        <span><i class="mk drop">✕</i>Dropped</span>
+        <span><i class="att"></i>Active slave (all slaves are active in balance-xor)</span>
+        <span><i class="noatt"></i>Dead path / link down</span>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div class="narr" aria-live="polite">
+        <div class="narr-head">
+          <span class="clock mono" id="clock">T+0.000 s</span>
+          <span class="docref" id="docref"></span>
+        </div>
+        <h2 id="stepTitle">—</h2>
+        <div id="stepBody" class="stepBody"></div>
+        <div id="decision" class="decision"></div>
+      </div>
+      <div class="tables" id="tables"></div>
+    </aside>
+  </section>
+
+
+  <section class="below">
+    <div class="below-grid">
+      <div>
+        <h3>Risks to put in front of the customer</h3>
+        <div class="risks" id="risks"></div>
+      </div>
+      <div class="notes">
+        <h3>Model assumptions</h3>
+        <ul>
+          <li>The bond is a <b>Linux kernel</b> bond (<span class="mono">mode=balance-xor</span>, <span class="mono">miimon=100</span>) enslaving eno1–eno4; OVS <span class="mono">br-ex</span> owns <span class="mono">bond0</span> as a single port. Open vSwitch has no balance-xor mode of its own. <span class="mono">br-int</span> and the patch port are collapsed into one "local" port.</li>
+          <li><b>Static port-channel</b> mode: the four ports of each node form a static LAG (<span class="mono">channel-group mode on</span>) across the MLAG pair; sw1/sw2 share one MAC table. <b>Plain ports</b> mode: same MLAG pair and peer-link, but the ports were never channel-grouped — the misconfiguration the bond cannot detect.</li>
+          <li>Default <span class="mono">xmit_hash_policy=layer2</span>: slave = (srcMAC[5] XOR dstMAC[5] XOR ethertype) mod slaves. With gateway …:fe that gives vm-web (…:01) → eno4, vm-x (…:02) → eno1, pods-A (…:0a) → eno1, pods-B (…:0b) → eno2; vm-web's ARP (ethertype 0x0806) → eno2. The <b>Hash</b> selector switches every scenario to layer3+4.</li>
+          <li>On a link failure the hash is taken modulo the remaining slave count, so most flows remap; the simulation shows the modulo-3 result and restores the link before the next failover.</li>
+          <li>Switch-side inbound member choice is the switch's own policy and need not match the bond's.</li>
+          <li>The <b>pods</b> square stands for all Kubernetes pod-network traffic on the node (node MAC via <span class="mono">br-ex</span>).</li>
+          <li>Timeline is compressed: animation time is not wall-clock. The clock shows real elapsed time.</li>
+        </ul>
+        <h3>Sources</h3>
+        <ul class="src">
+          <li><a href="https://www.kernel.org/doc/Documentation/networking/bonding.rst" target="_blank" rel="noopener noreferrer">Linux kernel bonding.rst — balance-xor, xmit_hash_policy, miimon / arp_interval, switch configuration requirements</a></li>
+          <li><a href="https://docs.openvswitch.org/en/stable/topics/bonding/" target="_blank" rel="noopener noreferrer">Open vSwitch — Bonding (OVS bond modes, for comparison)</a></li>
+          <li><a href="https://github.com/openvswitch/ovs/blob/master/lib/mac-learning.h" target="_blank" rel="noopener noreferrer">OVS source — lib/mac-learning.h (300 s idle, 5 s GARP lock) for br-ex learning</a></li>
+          <li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/advanced_networking/network-bonding-considerations" target="_blank" rel="noopener noreferrer">Red Hat OCP 4.22 — Network bonding considerations (OVS vs kernel bonding)</a></li>
+          <li><a href="https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html" target="_blank" rel="noopener noreferrer">QEMU QMP — announce-self (broadcast RARP after migration)</a></li>
+          <li><a href="https://raft.github.io/" target="_blank" rel="noopener noreferrer">Design inspiration — RaftScope (raft.github.io)</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="./app.js"></script>
+</body>
+</html>

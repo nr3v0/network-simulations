@@ -24,6 +24,7 @@
   a.card { display: block; text-decoration: none; color: inherit; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-5); transition: border-color 0.15s ease, transform 0.15s ease; }
   a.card:hover { border-color: var(--color-primary); transform: translateY(-2px); }
   .card h2 { margin: 0 0 var(--space-2); font-size: var(--text-xl); }
+  .card h2 small { font-size: var(--text-sm); color: var(--color-text-muted); font-weight: 400; }
   .card .mono { font-family: var(--font-mono); font-size: 0.9em; color: var(--color-primary); }
   .card p { margin: 0 0 var(--space-3); color: var(--color-text-muted); line-height: 1.5; font-size: var(--text-sm); }
   .card ul { margin: 0; padding-left: 1.1rem; color: var(--color-text-muted); font-size: var(--text-sm); line-height: 1.6; }
@@ -35,7 +36,7 @@
 <body>
 <main>
   <h1>Network simulations</h1>
-  <p class="lede">Step-through, RaftScope-style animations of how Open vSwitch bonds learn and re-learn MAC addresses across four ports and two switches — during cold start, VM live migration, hash rebalancing and failures. Built to explain the behaviour (and the risks) to platform and network teams.</p>
+  <p class="lede">Step-through, RaftScope-style animations of how OpenShift node bonds — three Open vSwitch modes and one Linux kernel mode — learn and re-learn MAC addresses across four ports and two switches during cold start, VM live migration, rebalancing, failover and misconfiguration. Built to explain the behaviour (and the risks) to platform and network teams.</p>
   <div class="grid">
     <a class="card" href="./ovs-balance-slb/">
       <h2>SLB Scope <span class="mono">balance-slb</span></h2>
@@ -57,8 +58,28 @@
       </ul>
       <span class="go">Open simulation →</span>
     </a>
+    <a class="card" href="./ovs-active-backup/">
+      <h2>AB Scope <span class="mono">active-backup</span></h2>
+      <p>One active member, three idle backups, no switch cooperation. Shows the RARP burst and MAC moves on every failover, failover into a dead backup, bond-primary flapping, and why this is the only OVS mode that is safe on un-grouped ports.</p>
+      <ul>
+        <li>Cold start → migration, lifecycle with N failovers</li>
+        <li>Backups drop everything they receive</li>
+        <li>Kernel active-backup variant compared</li>
+      </ul>
+      <span class="go">Open simulation →</span>
+    </a>
+    <a class="card" href="./kernel-balance-xor/">
+      <h2>XOR Scope <span class="mono">balance-xor</span> <small>kernel mode 2</small></h2>
+      <p>Linux kernel bond under br-ex with a static port-channel. Shows the layer2 hash formula pinning pods and VMs to single slaves, modulo remapping on link loss, undetected dead paths, and what happens when nobody configured the port-channel.</p>
+      <ul>
+        <li>layer2 vs layer3+4 hash policies, live</li>
+        <li>Static LAG vs plain ports (MAC flapping, duplicates, reflections)</li>
+        <li>Not an OVS mode — documented as kernel bonding</li>
+      </ul>
+      <span class="go">Open simulation →</span>
+    </a>
   </div>
-  <footer>Static HTML/SVG/JS, no build step. Source and model notes: <a href="https://github.com/nr3v0/network-simulations">github.com/nr3v0/network-simulations</a>. Behaviour is derived from the <a href="https://docs.openvswitch.org/en/stable/topics/bonding/">OVS bonding documentation</a> and the OVS sources (bond.c, lacp.c, mac-learning.h, ofproto-dpif-xlate.c); see each simulation's assumptions and sources.</footer>
+  <footer>Static HTML/SVG/JS, no build step. Source and model notes: <a href="https://github.com/nr3v0/network-simulations">github.com/nr3v0/network-simulations</a>. Behaviour is derived from the <a href="https://docs.openvswitch.org/en/stable/topics/bonding/">OVS bonding documentation</a> and the OVS sources (bond.c, lacp.c, mac-learning.h, ofproto-dpif-xlate.c) and the Linux kernel bonding documentation; see each simulation's assumptions and sources.</footer>
 </main>
 </body>
 </html>
