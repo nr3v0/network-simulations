@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Network simulations — OVS bonding during VM live migration</title>
+<meta name="description" content="Interactive, step-through simulations of Open vSwitch bond behaviour (balance-slb and LACP balance-tcp) across two switches during VM live migration." />
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="./ovs-balance-slb/base.css" />
+<style>
+  :root { --text-xs: 0.8rem; --text-sm: 0.92rem; --text-base: 1.05rem; --text-xl: 1.4rem; --text-3xl: clamp(1.9rem, 1.4rem + 2vw, 2.6rem);
+    --space-2: 0.5rem; --space-3: 0.75rem; --space-4: 1rem; --space-5: 1.25rem; --space-8: 2rem; --space-10: 2.5rem; --space-12: 3rem; --space-16: 4rem; --radius-lg: 0.75rem;
+    --font-sans: 'General Sans', 'Inter', system-ui, sans-serif; --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    --color-background: oklch(0.17 0.012 240); --color-bg: var(--color-background); --color-surface: oklch(0.21 0.014 240); --color-border: oklch(0.34 0.02 240);
+    --color-text: oklch(0.93 0.01 240); --color-text-muted: oklch(0.70 0.015 240); --color-text-faint: oklch(0.61 0.015 240); --color-primary: oklch(0.78 0.12 195); }
+  html { color-scheme: dark; }
+  body { margin: 0; background: var(--color-background); color: var(--color-text); font-family: var(--font-sans); }
+  main { max-width: 960px; margin: 0 auto; padding: var(--space-10) var(--space-5) var(--space-12); }
+  h1 { font-size: var(--text-3xl); margin: 0 0 var(--space-2); letter-spacing: -0.01em; }
+  .lede { color: var(--color-text-muted); max-width: 60ch; line-height: 1.55; margin: 0 0 var(--space-8); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--space-4); }
+  a.card { display: block; text-decoration: none; color: inherit; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-5); transition: border-color 0.15s ease, transform 0.15s ease; }
+  a.card:hover { border-color: var(--color-primary); transform: translateY(-2px); }
+  .card h2 { margin: 0 0 var(--space-2); font-size: var(--text-xl); }
+  .card .mono { font-family: var(--font-mono); font-size: 0.9em; color: var(--color-primary); }
+  .card p { margin: 0 0 var(--space-3); color: var(--color-text-muted); line-height: 1.5; font-size: var(--text-sm); }
+  .card ul { margin: 0; padding-left: 1.1rem; color: var(--color-text-muted); font-size: var(--text-sm); line-height: 1.6; }
+  .card .go { display: inline-block; margin-top: var(--space-4); color: var(--color-primary); font-weight: 500; font-size: var(--text-sm); }
+  footer { margin-top: var(--space-10); color: var(--color-text-faint); font-size: var(--text-xs); line-height: 1.6; }
+  footer a { color: var(--color-text-muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Network simulations</h1>
+  <p class="lede">Step-through, RaftScope-style animations of how Open vSwitch bonds learn and re-learn MAC addresses across four ports and two switches — during cold start, VM live migration, hash rebalancing and failures. Built to explain the behaviour (and the risks) to platform and network teams.</p>
+  <div class="grid">
+    <a class="card" href="./ovs-balance-slb/">
+      <h2>SLB Scope <span class="mono">balance-slb</span></h2>
+      <p>Source-MAC load balancing with no switch cooperation. Shows the active-member broadcast rule, reflected-broadcast drops, the gratuitous-ARP exception and 5 s lock, and why a RARP-only migration announcement can strand a VM.</p>
+      <ul>
+        <li>Cold start → migration, lifecycle with N rebalances</li>
+        <li>All five SLB complications from the OVS bonding docs</li>
+        <li>MLAG peer-link vs. independent switches</li>
+      </ul>
+      <span class="go">Open simulation →</span>
+    </a>
+    <a class="card" href="./ovs-lacp-balance-tcp/">
+      <h2>LACP Scope <span class="mono">balance-tcp</span></h2>
+      <p>802.3ad with per-flow hashing. Shows why a LAG makes migration a single MAC move, why rebalances become invisible, and the LACP-specific failure modes: un-negotiated day 0, MLAG peer-link loss, slow timers, elephant flows.</p>
+      <ul>
+        <li>Same topology and scenarios for side-by-side comparison</li>
+        <li>LACP member states and partner-mismatch handling</li>
+        <li>MLAG (one LACP system) vs. two independent systems</li>
+      </ul>
+      <span class="go">Open simulation →</span>
+    </a>
+  </div>
+  <footer>Static HTML/SVG/JS, no build step. Source and model notes: <a href="https://github.com/nr3v0/network-simulations">github.com/nr3v0/network-simulations</a>. Behaviour is derived from the <a href="https://docs.openvswitch.org/en/stable/topics/bonding/">OVS bonding documentation</a> and the OVS sources (bond.c, lacp.c, mac-learning.h, ofproto-dpif-xlate.c); see each simulation's assumptions and sources.</footer>
+</main>
+</body>
+</html>

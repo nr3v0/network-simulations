@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LACP Scope — OVS balance-tcp (802.3ad) MAC learning during VM live migration</title>
+<meta name="description" content="Step-through visualization of an Open vSwitch LACP (balance-tcp / 802.3ad) bond across two MLAG switches and four members during a VM live migration, with the LACP-specific failure modes." />
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="./base.css" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<a class="skip" href="#scope">Skip to visualization</a>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="16" r="4" fill="currentColor"/><path d="M16 3v6M16 23v6M3 16h6M23 16h6" stroke="currentColor" stroke-width="2"/></svg>
+    <div>
+      <div class="brand-name">LACP Scope</div>
+      <div class="brand-sub">OVS <span class="mono">balance-tcp</span> + LACP · MAC learning during VM live migration · <a href="../ovs-balance-slb/">compare: balance-slb</a></div>
+    </div>
+  </div>
+  <nav class="scen" id="scenarios" aria-label="Scenarios"></nav>
+</header>
+
+<main id="scope">
+  <section class="transport" aria-label="Playback controls">
+    <div class="toolbar">
+        <span class="tb-label">Switches</span>
+        <div class="seg" role="group" aria-label="Switch interconnect mode" id="modeSeg">
+          <button type="button" data-mode="mlag" aria-pressed="true">MLAG · one LACP system</button>
+          <button type="button" data-mode="indep" aria-pressed="false">Independent · two systems</button>
+        </div>
+        <label class="sel" id="lifeOpt" hidden><span>Rebalances</span>
+          <select id="nreb" aria-label="Number of hash rebalances before the second migration"><option value="0">0</option><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select>
+        </label>
+      </div>
+
+    <div class="btns">
+      <button id="prev" class="ib" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z"/></svg></button>
+      <button id="play" class="ib main" aria-label="Play" title="Play / pause (space)"><svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4l13 8-13 8z"/></svg></button>
+      <button id="next" class="ib" aria-label="Next step" title="Next step (→)"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
+      <button id="restart" class="ib" aria-label="Restart scenario" title="Restart"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v5h5"/></svg></button>
+    </div>
+    <div class="track-wrap">
+      <div class="track" id="track"></div>
+      <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Timeline" />
+    </div>
+    <div class="opts">
+      <label class="sel"><span>Speed</span>
+        <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+      </label>
+      <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause each step</span></label>
+      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · 1.5 s</span></label>
+    </div>
+  </section>
+  <section class="stage">
+    <div class="canvas-wrap">
+      <div class="whatif" id="whatif" hidden>Hypothetical</div>
+      <svg id="topo" viewBox="0 0 1000 704" role="img" aria-labelledby="topoTitle">
+        <title id="topoTitle">Two OpenShift nodes, each with a four-member OVS balance-tcp LACP bond. eno1 and eno2 connect to sw1, eno3 and eno4 connect to sw2. sw1 and sw2 are an MLAG pair presenting one LACP system-ID, uplinked to core1.</title>
+        <g id="static"></g>
+        <g id="dyn"></g>
+      </svg>
+      <div class="legend" aria-label="Legend">
+        <span><i class="dot k-uni"></i>Unicast</span>
+        <span><i class="dot k-bcast"></i>ARP broadcast</span>
+        <span><i class="dot k-garp"></i>Gratuitous ARP</span>
+        <span><i class="dot k-rarp"></i>RARP</span>
+        <span><i class="dot k-mig"></i>Migration copy</span>
+        <span><i class="dot k-lacp"></i>LACPDU</span>
+        <span><i class="sq"></i>Pod network (node MAC via br-ex)</span>
+        <span><i class="mk ok">✓</i>Accepted</span>
+        <span><i class="mk drop">✕</i>Dropped</span>
+        <span><i class="att"></i>LACP attached (collecting &amp; distributing)</span>
+        <span><i class="noatt"></i>Not attached (no sync / no LACPDU)</span>
+      </div>
+    </div>
+
+    <aside class="side">
+      <div class="narr" aria-live="polite">
+        <div class="narr-head">
+          <span class="clock mono" id="clock">T+0.000 s</span>
+          <span class="docref" id="docref"></span>
+        </div>
+        <h2 id="stepTitle">—</h2>
+        <div id="stepBody" class="stepBody"></div>
+        <div id="decision" class="decision"></div>
+      </div>
+      <div class="tables" id="tables"></div>
+    </aside>
+  </section>
+
+
+  <section class="below">
+    <div class="below-grid">
+      <div>
+        <h3>Risks to put in front of the customer</h3>
+        <div class="risks" id="risks"></div>
+      </div>
+      <div class="notes">
+        <h3>Model assumptions</h3>
+        <ul>
+          <li><span class="mono">br-ex</span>, <span class="mono">br-int</span> and the patch ports are collapsed into one "local" port on <span class="mono">br-phy</span>, the bridge that owns the bond. Bond: <span class="mono">bond_mode=balance-tcp lacp=active</span>, defaults otherwise (<span class="mono">lacp-time=slow</span>, <span class="mono">lacp-fallback-ab=false</span>).</li>
+          <li><b>MLAG</b> mode: sw1/sw2 present one LACP system-ID, so each node's four links form one port-channel (Po-A, Po-B) that spans both switches, with one synchronised MAC table. <b>Independent</b> mode: two system-IDs; OVS attaches only the aggregator of its lead member (eno1 → sw1), so eno3/eno4 are out of sync and sw2 keeps them out of its bundle.</li>
+          <li>Flows are hashed on L2/L3/L4 into 256 buckets; which member a given flow uses (vm-web → eno2 and eno3, pods across all four) is illustrative. The switch hashes return traffic independently.</li>
+          <li>A LAG is one logical port to the switch: floods go once per port-channel, never back onto the source port-channel.</li>
+          <li>The <b>pods</b> square stands for all Kubernetes pod-network traffic on the node (node MAC via <span class="mono">br-ex</span>); unlike SLB, its many flows are spread across members.</li>
+          <li>Timeline is compressed: animation time is not wall-clock. The clock shows real elapsed time.</li>
+        </ul>
+        <h3>Sources</h3>
+        <ul class="src">
+          <li><a href="https://docs.openvswitch.org/en/stable/topics/bonding/" target="_blank" rel="noopener noreferrer">Open vSwitch — Bonding (LACP bonding, lacp-fallback-ab, rebalancing, learning packets)</a></li>
+          <li><a href="https://www.openvswitch.org/support/dist-docs/ovs-vswitchd.conf.db.5.txt" target="_blank" rel="noopener noreferrer">ovs-vswitchd.conf.db(5) — balance-tcp, lacp, lacp-time, lacp-fallback-ab, bond-rebalance-interval, lacp-system-id</a></li>
+          <li><a href="https://github.com/openvswitch/ovs/blob/master/ofproto/bond.c" target="_blank" rel="noopener noreferrer">OVS source — ofproto/bond.c (bond_check_admissibility: LACP_NEGOTIATED → accept)</a></li>
+          <li><a href="https://github.com/openvswitch/ovs/blob/master/lib/lacp.c" target="_blank" rel="noopener noreferrer">OVS source — lib/lacp.c (lacp_update_attached, partner system-ID matching, 1 s / 30 s × 3 timers)</a></li>
+          <li><a href="https://github.com/openvswitch/ovs/blob/master/lib/mac-learning.h" target="_blank" rel="noopener noreferrer">OVS source — lib/mac-learning.h (300 s idle, 5 s GARP lock)</a></li>
+          <li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/advanced_networking/network-bonding-considerations" target="_blank" rel="noopener noreferrer">Red Hat OCP 4.22 — Network bonding considerations</a></li>
+          <li><a href="https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html" target="_blank" rel="noopener noreferrer">QEMU QMP — announce-self (broadcast RARP after migration)</a></li>
+          <li><a href="https://raft.github.io/" target="_blank" rel="noopener noreferrer">Design inspiration — RaftScope (raft.github.io)</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="./app.js"></script>
+</body>
+</html>
