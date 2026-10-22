@@ -137,6 +137,121 @@
   /* ---------------- Decision trace helpers ---------------- */
   const D = (cls, where, html) => ({ cls, where, html });
 
+
+  /* ---------------- Lifecycle scenario (cold start → migrate → N rebalances → migrate back) ---------------- */
+  let nReb = 2; // user-selectable number of rebalances
+  // Background Kubernetes pod traffic: pods ↔ gateway on both nodes, every step.
+  function podTraffic(o = 0) {
+    const out = [];
+    [['A', 0], ['B', 0.3]].forEach(([h, d]) => {
+      const t = o + d;
+      out.push({ pts: join(up(h, 'pods', 'eno1'), toCore('sw1')), k: 'pod', t0: t, t1: t + 0.3, end: null });
+      out.push({ pts: join(fromCore('sw1'), dn('sw1', h, 'eno1', 'pods')), k: 'pod', t0: t + 0.32, t1: t + 0.62, end: null });
+    });
+    return out;
+  }
+  const other = (h) => (h === 'A' ? 'B' : 'A');
+  // Five steps that move vm-web from `from` to `to`, announcing on `member` (a non-active member of `to`).
+  function migrateSteps(from, to, member, base, firstTime) {
+    const fmt = (sec) => (sec < 0 ? `T−${Math.abs(sec)} s` : `T+${Number.isInteger(sec) ? sec : sec.toFixed(3)} s`);
+    const clock = fmt(base);
+    const rev = from === 'B';
+    const mig = rev ? MIG.slice().reverse() : MIG;
+    const sw = swOf(member), hTo = to === 'A' ? 'hA' : 'hB', hFrom = from === 'A' ? 'hA' : 'hB';
+    const port = `${to}·${member}`;
+    return [
+      { clock: fmt(base - 3), title: `Live migration ${from} → ${to}: pre-copy`, doc: 'Setup', dur: 3600,
+        body: `<p>KubeVirt copies vm-web's memory to Node ${to}. vm-web keeps running on Node ${from}, so every table is still correct. Pod traffic on both nodes is unaffected throughout — it never shares a bucket with vm-web.</p>`,
+        vm: from, mig: true,
+        frames: [0.05, 0.25, 0.45].map((t) => ({ pts: mig, k: 'mig', t0: t, t1: t + 0.45 })).concat(podTraffic(0.1)) },
+      { clock: `${clock}`, title: `Switchover: vm-web resumes on Node ${to}`, doc: 'SLB complication #4', dur: 3200,
+        body: `<p>vm-web pauses on ${from} and resumes on ${to}. Every table is now wrong: the switches still point at Node ${from}, Node ${from} thinks vm-web is local, Node ${to} thinks it is out the bond.${firstTime ? '' : ' Node ' + from + ' also still holds the hash bucket vm-web last used there.'}</p>`,
+        vm: ['move', 0.1, 0.7, rev ? 'rev' : 'fwd'], mig: true,
+        frames: podTraffic(0.2),
+        up: [{ at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: from, k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: to, k: 'web', v: { stale: true } }, { at: 0.7, t: hFrom, k: 'web', v: null }] },
+      { clock: fmt(base + 0.002), title: `GARP leaves Node ${to} on ${member} — learned locally and locked`, doc: 'SLB complication #5', dur: 4000,
+        body: `<p>The gratuitous ARP enters <code>br-phy</code> from the local port: Node ${to} learns <code>vm-web → local</code> and locks it for 5 s. The bond assigns vm-web's bucket to <code>${member}</code>${firstTime ? ' on first use' : ' (bucket state from the earlier stay is not reused — assignment is arbitrary again)'}; ${sw} learns <code>vm-web → ${port}</code>.</p>`,
+        vm: to,
+        frames: [{ pts: up(to, 'web', member), k: 'garp', t0: 0.05, t1: 0.75, end: null, label: 'GARP' }].concat(podTraffic(0.3)),
+        up: [{ at: 0.18, t: to, k: 'web', v: { port: 'local', lock: true, fresh: true } }, { at: 0.4, t: hTo, k: 'web', v: member }, { at: 0.74, t: 'sw', k: 'web', v: { port, fresh: true } }] },
+      { clock: fmt(base + 0.003), title: 'GARP floods to every member on both nodes', doc: 'SLB complications #2, #4, #5', dur: 5200,
+        body: `<p><b>Node ${from}</b> (the old host) accepts the GARP on its active member only. vm-web is still learned <i>local</i> there — normally "loop, drop" — but the GARP exception applies, so it relearns <code>vm-web → bond0</code>. <b>Node ${to}</b> drops its own reflection: the entry is GARP-locked.</p>${indep ? '<p>With no peer-link the flood transits core1, which records a MAC move, and the other switch relearns vm-web via its uplink.</p>' : ''}`,
+        vm: to,
+        frames: flood(sw, `${to}.${member}`, 'garp', {
+          [`${from}.eno1`]: { to: 'local', end: 'ok', note: 'GARP exception' },
+          [`${to}.eno1`]: { to: 'adm', end: 'drop', note: 'locked' },
+        }, 0.05, 0.75, { core: true }).concat(podTraffic(0.35)),
+        up: [{ at: 0.66, t: from, k: 'web', v: { port: 'bond0', fresh: true } }],
+        dec: [D('ok', `Node ${from} · eno1 (active)`, 'src vm-web learned on <b>local</b> ≠ bond0 · is GARP ✓ · not locked → <b>admit, relearn → bond0</b>'), D('drop', `Node ${to} · eno1 (active)`, 'is GARP ✓ · entry <b>GARP-locked</b> → <b>drop</b>')] },
+      { clock: fmt(base + 0.01), title: `Converged on Node ${to}`, doc: 'Result', dur: 4000,
+        body: `<p>The gateway reaches vm-web through ${sw} → ${port}. One GARP corrected the switches and both nodes in milliseconds; pod traffic never noticed.</p>`,
+        vm: to,
+        frames: [{ pts: join(fromCore(sw), dn(sw, to, member, 'web')), k: 'uni', t0: 0.05, t1: 0.6, end: 'ok', label: 'gw → vm-web' }, { pts: join(up(to, 'web', member), toCore(sw)), k: 'uni', t0: 0.45, t1: 0.95, end: 'ok', label: 'vm-web → gw' }].concat(podTraffic(0.1)),
+        up: [{ at: 0.1, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }, { at: 0.9, t: 'patch', tb: to, k: 'web', v: { lock: false } }] },
+    ];
+  }
+  function rebalanceSteps(host, start, n, clock0) {
+    const cycle = ['eno3', 'eno4', 'eno2', 'eno1'];
+    const steps = [];
+    let cur = start, idx = cycle.indexOf(start);
+    const hk = host === 'A' ? 'hA' : 'hB';
+    for (let i = 1; i <= n; i++) {
+      idx = (idx + 1) % cycle.length;
+      const nxt = cycle[idx], sOld = swOf(cur), sNew = swOf(nxt), cross = sOld !== sNew;
+      const port = `${host}·${nxt}`;
+      const t = clock0 + i * 10;
+      let body = `<p>Every 10 s OVS compares per-member load. Member <code>${cur}</code> is carrying ≥1 Mbps and ≥3% more than <code>${nxt}</code> and holds at least two buckets, so vm-web's bucket is shifted to <code>${nxt}</code>${cross ? ` — <b>on the other switch (${sNew})</b>` : ` (same switch, ${sNew})`}. No learning packet is sent.</p>`;
+      body += `<p>vm-web's next frame leaves on ${nxt}. ${cross
+        ? (indep
+          ? `${sNew} learns <code>vm-web → ${port}</code> and <b>core1 sees a MAC move</b> from its ${sOld} port to its ${sNew} port. ${sOld} is not corrected (the frame was unicast toward core1) and keeps a stale entry until aging.`
+          : `The MLAG pair sees vm-web <b>move</b> from a ${sOld} port to a ${sNew} port and updates the synced table — a MAC move the switches may log or rate-limit.`)
+        : `${sNew} sees vm-web move between two of its own ports and updates its table.`} Until that frame, return traffic still lands on ${cur} — accepted, because unicast is accepted on any member.</p>`;
+      if (nxt === 'eno1') body += `<p>${nxt} is also the <b>active member</b>: vm-web now shares the link that carries all inbound broadcast and all pod traffic on this node.</p>`;
+      steps.push({ clock: `T+${t} s`, title: `Rebalance ${i}/${n}: bucket ${cur} → ${nxt}${cross ? ' (crosses switches)' : ''}`, doc: 'Bond packet output · rebalance', dur: 4600,
+        body, vm: host,
+        frames: [{ pts: join(up(host, 'web', nxt), toCore(sNew)), k: 'uni', t0: 0.3, t1: 0.9, end: 'ok', label: 'vm-web → gw' }].concat(podTraffic(0.05)),
+        up: [{ at: 0.15, t: hk, k: 'web', v: nxt }, { at: 0.15, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.72, t: 'sw', k: 'web', v: { port, fresh: true, uni: true } }],
+        dec: [D('warn', `Node ${host} bond0 · rebalance`, `bucket(vm-web) <b>${cur} → ${nxt}</b>; switch table still points at ${host}·${cur} until vm-web transmits`),
+          cross ? D('warn', indep ? 'core1' : `${sOld} + ${sNew} (MLAG)`, indep ? `vm-web: port ${sOld} → port ${sNew} — <b>MAC move</b> on the core` : `vm-web moves between MLAG peers — <b>MAC move</b> inside the pair`) : D('ok', sNew, `vm-web: ${host}·${cur} → ${port} — move within one switch`)] });
+      cur = nxt;
+    }
+    return { steps, last: cur };
+  }
+  function lifecycle() {
+    const reb = rebalanceSteps('B', 'eno3', nReb, 0);
+    const steps = []
+      .concat(coldStartSteps())
+      .concat(migrateSteps('A', 'B', 'eno3', 0, true))
+      .concat(reb.steps)
+      .concat(migrateSteps('B', 'A', 'eno2', nReb * 10 + 30, false));
+    steps.push({ clock: `T+${nReb * 10 + 31} s`, title: 'Back on Node A — what the fabric saw', doc: 'Summary', dur: 4200,
+      body: `<p>Two migrations and ${nReb} rebalance${nReb === 1 ? '' : 's'}: vm-web's MAC changed switch port <b>${2 + nReb}</b> times${indep ? ', with a MAC move on core1 each time it changed switches' : ', each one a MAC move inside the MLAG pair'}. Only the two migrations sent an announcement; every rebalance relied on vm-web's own next frame.</p><p>Pod traffic (pods ↔ gw) stayed on eno1 the whole time: one MAC, one bucket, one member.</p>`,
+      vm: 'A',
+      frames: [{ pts: join(fromCore('sw1'), dn('sw1', 'A', 'eno2', 'web')), k: 'uni', t0: 0.05, t1: 0.6, end: 'ok', label: 'gw → vm-web' }].concat(podTraffic(0.1)) });
+    return { id: 'life', n: '2', name: 'Lifecycle: migrate → rebalance ×N → migrate back', init: coldStart, steps };
+  }
+  function coldStartSteps() {
+    return [
+        { clock: 'T−60 s', title: 'Cold start: nobody has learned vm-web yet', doc: 'Bond packet output · SLB complication #3', dur: 6000,
+          body: `<p>vm-web boots on Node A and ARPs for its gateway. The broadcast enters <code>br-phy</code> from the local port, so <b>Node A learns vm-web → local</b>; the bond assigns its bucket to <code>eno2</code> on first use and sw1 learns <code>vm-web → A·eno2</code>.</p><p>The switches flood the ARP to every other member. Node A's own copies: eno1 (active) is dropped as a reflection — vm-web is learned locally — and eno3/eno4 as non-active. Node B accepts the copy on its active member and <b>learns vm-web → bond0</b>.</p>`,
+          bodyI: `<p>vm-web boots on Node A and ARPs for its gateway. The broadcast enters <code>br-phy</code> from the local port, so <b>Node A learns vm-web → local</b>; the bond assigns its bucket to <code>eno2</code> and sw1 learns <code>vm-web → A·eno2</code>.</p><p>With no peer-link, sw1 floods to core1, which learns vm-web on its sw1 port and floods to sw2, which learns <code>vm-web → core1</code>. Node A drops its own reflections (eno1: looped back; eno3/eno4: non-active). Node B accepts the copy on its active member and <b>learns vm-web → bond0</b>.</p>`,
+          vm: 'A',
+          frames: [{ pts: up('A', 'web', 'eno2'), k: 'bcast', t0: 0.03, t1: 0.42, label: 'ARP who-has gw' }].concat(flood('sw1', 'A.eno2', 'bcast', {
+            'A.eno1': { to: 'adm', end: 'drop', note: 'looped back' }, 'B.eno1': { to: 'br', end: 'ok', note: 'learned → bond0' },
+          }, 0.42, 0.9, { core: true })).concat(podTraffic(0.3)),
+          up: [{ at: 0.1, t: 'A', k: 'web', v: { port: 'local', fresh: true } }, { at: 0.16, t: 'hA', k: 'web', v: 'eno2' }, { at: 0.41, t: 'sw', k: 'web', v: { port: 'A·eno2', fresh: true } }, { at: 0.82, t: 'B', k: 'web', v: { port: 'bond0', fresh: true } }],
+          dec: [D('ok', 'Node A br-phy · ingress local', 'first frame from <code>…:01</code> → learn <code>vm-web → local</code>; bucket unassigned → pick <b>eno2</b>'), D('drop', 'Node A · eno1 (active)', 'src vm-web learned on <b>local</b> ≠ bond0 → <b>drop</b> (reflection)'), D('ok', 'Node B · eno1 (active)', 'src vm-web unknown → <b>learn vm-web → bond0</b>, admit')] },
+        { clock: 'T−59 s', title: 'The gateway answers, then broadcasts in turn', doc: 'Bond packet input', dur: 6000,
+          body: `<p>The ARP reply is unicast: sw1 sends it to A·eno2 (the port it learned vm-web on). Node A accepts it on a non-active member and <b>learns gw → bond0</b>.</p><p>Soon the gateway broadcasts an ARP of its own. Every node accepts it on its active member only, so <b>Node B learns gw → bond0</b> too. From here every table in the fabric agrees.</p>`,
+          vm: 'A',
+          frames: [{ pts: join(fromCore('sw1'), dn('sw1', 'A', 'eno2', 'web')), k: 'uni', t0: 0.03, t1: 0.42, end: 'ok', label: 'ARP reply → vm-web' }].concat(coreFlood('bcast', {
+            'A.eno1': { to: 'br', end: 'ok' }, 'B.eno1': { to: 'br', end: 'ok', note: 'gw learned' },
+          }, 0.5, 0.95, { label: 'gw ARP who-has' })).concat(podTraffic(0.05)),
+          up: [{ at: 0.1, t: 'sw', k: 'gw', v: { port: 'core1', fresh: true } }, { at: 0.3, t: 'A', k: 'gw', v: { port: 'bond0', fresh: true } }, { at: 0.9, t: 'B', k: 'gw', v: { port: 'bond0', fresh: true } }],
+          dec: [D('ok', 'Node A · eno2 (non-active)', 'unicast → no active-member filter · src gw unknown → <b>learn gw → bond0</b>'), D('ok', 'Node A · eno1, Node B · eno1 (active)', 'broadcast on active → admit; Node B <b>learns gw → bond0</b>')] },
+    ];
+  }
+
   /* ---------------- Scenarios ---------------- */
   function buildScenarios() { return [
     {
@@ -175,23 +290,7 @@
     {
       id: 'happy', n: '1', name: 'Cold start → migration (happy path)', init: coldStart,
       steps: [
-        { clock: 'T−60 s', title: 'Cold start: nobody has learned vm-web yet', doc: 'Bond packet output · SLB complication #3', dur: 6000,
-          body: `<p>vm-web boots on Node A and ARPs for its gateway. The broadcast enters <code>br-phy</code> from the local port, so <b>Node A learns vm-web → local</b>; the bond assigns its bucket to <code>eno2</code> on first use and sw1 learns <code>vm-web → A·eno2</code>.</p><p>The switches flood the ARP to every other member. Node A's own copies: eno1 (active) is dropped as a reflection — vm-web is learned locally — and eno3/eno4 as non-active. Node B accepts the copy on its active member and <b>learns vm-web → bond0</b>.</p>`,
-          bodyI: `<p>vm-web boots on Node A and ARPs for its gateway. The broadcast enters <code>br-phy</code> from the local port, so <b>Node A learns vm-web → local</b>; the bond assigns its bucket to <code>eno2</code> and sw1 learns <code>vm-web → A·eno2</code>.</p><p>With no peer-link, sw1 floods to core1, which learns vm-web on its sw1 port and floods to sw2, which learns <code>vm-web → core1</code>. Node A drops its own reflections (eno1: looped back; eno3/eno4: non-active). Node B accepts the copy on its active member and <b>learns vm-web → bond0</b>.</p>`,
-          vm: 'A',
-          frames: [{ pts: up('A', 'web', 'eno2'), k: 'bcast', t0: 0.03, t1: 0.42, label: 'ARP who-has gw' }].concat(flood('sw1', 'A.eno2', 'bcast', {
-            'A.eno1': { to: 'adm', end: 'drop', note: 'looped back' }, 'B.eno1': { to: 'br', end: 'ok', note: 'learned → bond0' },
-          }, 0.42, 0.9, { core: true })),
-          up: [{ at: 0.1, t: 'A', k: 'web', v: { port: 'local', fresh: true } }, { at: 0.16, t: 'hA', k: 'web', v: 'eno2' }, { at: 0.41, t: 'sw', k: 'web', v: { port: 'A·eno2', fresh: true } }, { at: 0.82, t: 'B', k: 'web', v: { port: 'bond0', fresh: true } }],
-          dec: [D('ok', 'Node A br-phy · ingress local', 'first frame from <code>…:01</code> → learn <code>vm-web → local</code>; bucket unassigned → pick <b>eno2</b>'), D('drop', 'Node A · eno1 (active)', 'src vm-web learned on <b>local</b> ≠ bond0 → <b>drop</b> (reflection)'), D('ok', 'Node B · eno1 (active)', 'src vm-web unknown → <b>learn vm-web → bond0</b>, admit')] },
-        { clock: 'T−59 s', title: 'The gateway answers, then broadcasts in turn', doc: 'Bond packet input', dur: 6000,
-          body: `<p>The ARP reply is unicast: sw1 sends it to A·eno2 (the port it learned vm-web on). Node A accepts it on a non-active member and <b>learns gw → bond0</b>.</p><p>Soon the gateway broadcasts an ARP of its own. Every node accepts it on its active member only, so <b>Node B learns gw → bond0</b> too. From here every table in the fabric agrees.</p>`,
-          vm: 'A',
-          frames: [{ pts: join(fromCore('sw1'), dn('sw1', 'A', 'eno2', 'web')), k: 'uni', t0: 0.03, t1: 0.42, end: 'ok', label: 'ARP reply → vm-web' }].concat(coreFlood('bcast', {
-            'A.eno1': { to: 'br', end: 'ok' }, 'B.eno1': { to: 'br', end: 'ok', note: 'gw learned' },
-          }, 0.5, 0.95, { label: 'gw ARP who-has' })),
-          up: [{ at: 0.1, t: 'sw', k: 'gw', v: { port: 'core1', fresh: true } }, { at: 0.3, t: 'A', k: 'gw', v: { port: 'bond0', fresh: true } }, { at: 0.9, t: 'B', k: 'gw', v: { port: 'bond0', fresh: true } }],
-          dec: [D('ok', 'Node A · eno2 (non-active)', 'unicast → no active-member filter · src gw unknown → <b>learn gw → bond0</b>'), D('ok', 'Node A · eno1, Node B · eno1 (active)', 'broadcast on active → admit; Node B <b>learns gw → bond0</b>')] },
+        ...coldStartSteps(),
         { clock: 'T−3 s', title: 'Live migration: pre-copy', doc: 'Setup', dur: 3600,
           body: `<p>Minutes later KubeVirt copies vm-web's memory to Node B over the migration network. vm-web keeps running on Node A, so every MAC table in the fabric is still correct:</p><p>sw1/sw2 → <code>A·eno2</code> · Node A → <code>local</code> · Node B → <code>bond0</code>.</p>`,
           bodyI: `<p>Minutes later KubeVirt copies vm-web's memory to Node B over the migration network. vm-web keeps running on Node A, so every table is still correct:</p><p>sw1 → <code>A·eno2</code> · core1 → <code>sw1</code> · sw2 → <code>core1</code> · Node A → <code>local</code> · Node B → <code>bond0</code>.</p>`,
@@ -234,6 +333,8 @@
           vm: 'B', up: [{ at: 0.3, t: 'patch', tb: 'B', k: 'web', v: { lock: false } }] },
       ],
     },
+
+    lifecycle(),
     {
       id: 'ex1', n: '#1', bad: true, name: 'Unknown unicast → duplicates', init: () => { const s = converged(); applySw(s, 'web', null); return s; },
       steps: [
@@ -590,7 +691,7 @@
     let scale = 1;
     if (Array.isArray(v)) {
       const f = ease(Math.min(1, Math.max(0, (lf - v[1]) / (v[2] - v[1]))));
-      pos = at(MIG, f);
+      pos = at(v[3] === 'rev' ? MIG.slice().reverse() : MIG, f);
       const edge = Math.min(f, 1 - f) * 8; // shrink while travelling the migration path
       scale = 1 - 0.5 * Math.min(1, edge);
     } else pos = HOST[v].vm.web;
@@ -732,10 +833,10 @@
     const node = (h) => {
       const hk = h === 'A' ? 'hA' : 'hB';
       const nm = { web: 'vm-web', x: 'vm-x', pA: 'pods', pB: 'pods' };
-      const hash = Object.entries(s[hk]).map(([k, m]) => `<span class="${ch.has(`${hk}.${k}`) ? 'flag new' : ''}">${nm[k]}→<b>${m}</b></span>`).join(' ') || '<span>—</span>';
+      const hash = Object.entries(s[hk]).map(([k, m]) => `<span class="${ch.has(`${hk}.${k}`) ? 'flag new' : ''}">${nm[k]}→<b>${m}</b></span>`).join('') || '<span>—</span>';
       const downs = ENOS.filter((e) => s.down[`${h}.${e}`]).map((e) => `<span class="flag wrong">${e} down</span>`).join('');
       return `<div class="tbl"><h4>Node ${h} FDB <small>br-phy</small></h4><table><thead><tr><th>MAC</th><th>port</th></tr></thead><tbody>${ROWS.map((k) => row(h, k, s[h][k])).join('')}</tbody></table>
-        <div class="meta"><span>active <b>${s.act[h]}</b></span>${downs}</div><div class="meta"><span>hash ${hash}</span></div></div>`;
+        <div class="meta"><span>active <b>${s.act[h]}</b></span>${downs}</div><div class="meta"><span>hash</span>${hash}</div></div>`;
     };
     $('#tables').innerHTML = swT + node('A') + node('B');
   }
@@ -750,6 +851,7 @@
     cancelLoop();
     S = SCEN.find((x) => x.id === id) || SCEN[0];
     document.querySelectorAll('#scenarios button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === S.id)));
+    $('#lifeOpt').hidden = S.id !== 'life';
     $('#track').innerHTML = S.steps.map((st, k) => `<span class="${S.bad ? 'bad' : ''}" title="${k + 1}. ${st.title.replace(/"/g, '&quot;')}" data-k="${k}"><i></i></span>`).join('');
     T = 0; lastStepIdx = -1; lastTblKey = ''; holdAt = null;
     render();
@@ -788,6 +890,7 @@
     }
     requestAnimationFrame(tick);
   }
+  $('#nreb').addEventListener('change', (e) => { nReb = +e.target.value; rebuildScenarios(); load('life', true); });
   $('#loop').addEventListener('change', (e) => { if (!e.target.checked) cancelLoop(); else if (!playing && T >= S.total - 2) scheduleLoop(); });
   $('#modeSeg').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;

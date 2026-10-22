@@ -29,11 +29,14 @@
 <main id="scope">
   <section class="transport" aria-label="Playback controls">
     <div class="toolbar">
-        <span class="tb-label">Switch interconnect</span>
+        <span class="tb-label">Switches</span>
         <div class="seg" role="group" aria-label="Switch interconnect mode" id="modeSeg">
           <button type="button" data-mode="mlag" aria-pressed="true">MLAG peer-link</button>
-          <button type="button" data-mode="indep" aria-pressed="false">Independent · L2 via core1</button>
+          <button type="button" data-mode="indep" aria-pressed="false">Independent via core1</button>
         </div>
+        <label class="sel" id="lifeOpt" hidden><span>Rebalances</span>
+          <select id="nreb" aria-label="Number of hash rebalances before the second migration"><option value="0">0</option><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select>
+        </label>
       </div>
 
     <div class="btns">
@@ -50,8 +53,8 @@
       <label class="sel"><span>Speed</span>
         <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
       </label>
-      <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause after each step</span></label>
-      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · restart after 1.5 s</span></label>
+      <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause each step</span></label>
+      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · 1.5 s</span></label>
     </div>
   </section>
   <section class="stage">
