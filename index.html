@@ -27,15 +27,35 @@
 </header>
 
 <main id="scope">
-  <section class="stage">
-    <div class="canvas-wrap">
-      <div class="toolbar">
+  <section class="transport" aria-label="Playback controls">
+    <div class="toolbar">
         <span class="tb-label">Switch interconnect</span>
         <div class="seg" role="group" aria-label="Switch interconnect mode" id="modeSeg">
           <button type="button" data-mode="mlag" aria-pressed="true">MLAG peer-link</button>
           <button type="button" data-mode="indep" aria-pressed="false">Independent · L2 via core1</button>
         </div>
       </div>
+
+    <div class="btns">
+      <button id="prev" class="ib" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z"/></svg></button>
+      <button id="play" class="ib main" aria-label="Play" title="Play / pause (space)"><svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4l13 8-13 8z"/></svg></button>
+      <button id="next" class="ib" aria-label="Next step" title="Next step (→)"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
+      <button id="restart" class="ib" aria-label="Restart scenario" title="Restart"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v5h5"/></svg></button>
+    </div>
+    <div class="track-wrap">
+      <div class="track" id="track"></div>
+      <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Timeline" />
+    </div>
+    <div class="opts">
+      <label class="sel"><span>Speed</span>
+        <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+      </label>
+      <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause after each step</span></label>
+      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · restart after 1.5 s</span></label>
+    </div>
+  </section>
+  <section class="stage">
+    <div class="canvas-wrap">
       <div class="whatif" id="whatif" hidden>Hypothetical</div>
       <svg id="topo" viewBox="0 0 1000 704" role="img" aria-labelledby="topoTitle">
         <title id="topoTitle">Two OpenShift nodes, each with a four-member OVS balance-slb bond. eno1 and eno2 connect to sw1, eno3 and eno4 connect to sw2. sw1 and sw2 are an MLAG pair uplinked to core1.</title>
@@ -69,25 +89,6 @@
     </aside>
   </section>
 
-  <section class="transport" aria-label="Playback controls">
-    <div class="btns">
-      <button id="prev" class="ib" aria-label="Previous step" title="Previous step (←)"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z"/></svg></button>
-      <button id="play" class="ib main" aria-label="Play" title="Play / pause (space)"><svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4l13 8-13 8z"/></svg></button>
-      <button id="next" class="ib" aria-label="Next step" title="Next step (→)"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
-      <button id="restart" class="ib" aria-label="Restart scenario" title="Restart"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v5h5"/></svg></button>
-    </div>
-    <div class="track-wrap">
-      <div class="track" id="track"></div>
-      <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Timeline" />
-    </div>
-    <div class="opts">
-      <label class="sel"><span>Speed</span>
-        <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
-      </label>
-      <label class="chk"><input type="checkbox" id="hold" checked /> <span>Pause after each step</span></label>
-      <label class="chk"><input type="checkbox" id="loop" /> <span>Loop · restart after 1.5 s</span></label>
-    </div>
-  </section>
 
   <section class="below">
     <div class="below-grid">

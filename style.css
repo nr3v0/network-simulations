@@ -93,7 +93,7 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); gap: var(--space-5); align-items: start; }
 .canvas-wrap { position: relative; background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-lg); padding: var(--space-3); }
 #topo { display: block; width: 100%; height: auto; }
-.toolbar { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-1) var(--space-2); flex-wrap: wrap; }
+.toolbar { display: flex; align-items: center; gap: var(--space-2); padding-right: var(--space-4); border-right: 1px solid var(--color-divider); }
 .tb-label { font-size: var(--text-xs); color: var(--color-text-muted); }
 .seg { display: inline-flex; border: 1px solid var(--color-border); border-radius: var(--radius-full); overflow: hidden; background: var(--color-surface-2); }
 .seg button { font: inherit; font-size: var(--text-xs); font-weight: 500; color: var(--color-text-muted); background: transparent; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; min-height: 34px; transition: background var(--transition-interactive), color var(--transition-interactive); }
@@ -104,10 +104,10 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 #topo .pod { fill: oklch(0.3 0.05 60); stroke: var(--color-pod); stroke-width: 1.5; }
 #topo .frame.pod { fill: var(--color-pod); }
 .whatif {
-  position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
-  font-size: var(--text-xs); font-weight: 500; color: var(--color-warning);
+  position: absolute; top: var(--space-3); left: var(--space-3); max-width: 290px;
+  font-size: var(--text-xs); font-weight: 500; line-height: 1.3; color: var(--color-warning);
   background: color-mix(in oklab, var(--color-warning) 14%, var(--color-surface));
-  border: 1px dashed var(--color-warning); border-radius: var(--radius-full); padding: 0.25rem 0.75rem; z-index: 2;
+  border: 1px dashed var(--color-warning); border-radius: var(--radius-md); padding: 0.3rem 0.7rem; z-index: 2;
 }
 .legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); padding: var(--space-2) var(--space-2) var(--space-1); font-size: var(--text-xs); color: var(--color-text-muted); }
 .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
@@ -187,7 +187,7 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 @keyframes rowflash { 0% { background: var(--color-primary-highlight); } 100% { background: transparent; } }
 
 /* ---------- Transport ---------- */
-.transport { margin-top: var(--space-4); display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-4); align-items: center; background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); }
+.transport { margin-bottom: var(--space-4); display: grid; grid-template-columns: auto auto minmax(140px, 1fr) auto; gap: var(--space-4); align-items: center; background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-lg); padding: var(--space-3) var(--space-4); }
 .btns { display: flex; gap: var(--space-2); }
 .ib { width: 44px; height: 44px; border-radius: var(--radius-full); border: 1px solid var(--color-border); background: var(--color-surface-2); color: var(--color-text); cursor: pointer; display: inline-grid; place-items: center; transition: background var(--transition-interactive), transform var(--transition-interactive); }
 .ib svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -225,6 +225,9 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 .src li { word-break: break-word; }
 
 @media (max-width: 1100px) {
+  .transport { grid-template-columns: 1fr 1fr; }
+  .toolbar { border-right: 0; padding-right: 0; }
+  .track-wrap { grid-column: 1 / -1; }
   .stage { grid-template-columns: 1fr; }
   .side { position: static; }
   .below-grid { grid-template-columns: 1fr; }
@@ -234,7 +237,8 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
   .top { padding: var(--space-3); }
   .scen { margin-left: 0; }
   .transport { grid-template-columns: 1fr; }
-  .opts { justify-content: space-between; }
+  .opts { justify-content: space-between; flex-wrap: wrap; }
+  .toolbar { flex-wrap: wrap; }
   .tables { grid-template-columns: 1fr; }
   .tbl.sw { grid-column: auto; }
 }
