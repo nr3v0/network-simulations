@@ -844,7 +844,9 @@
   /* ---------------- Scenario chrome ---------------- */
   function buildNav() {
     const nav = $('#scenarios');
-    nav.innerHTML = SCEN.map((sc) => `<button data-id="${sc.id}" class="${sc.bad ? 'bad' : ''}" aria-pressed="false"><span class="n">${sc.n}</span>${sc.name}</button>`).join('');
+    const btn = (sc) => `<button data-id="${sc.id}" class="${sc.bad ? 'bad' : ''}" aria-pressed="false"><span class="n">${sc.n}</span>${sc.name}</button>`;
+    const walk = SCEN.filter((sc) => ['baseline', 'happy', 'life'].includes(sc.id)), rest = SCEN.filter((sc) => !walk.includes(sc));
+    nav.innerHTML = `<div class="row">${walk.map(btn).join('')}</div><div class="row">${rest.map(btn).join('')}</div>`;
     nav.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) load(b.dataset.id, true); });
   }
   function load(id, autoplay) {
