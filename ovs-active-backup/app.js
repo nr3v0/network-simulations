@@ -187,6 +187,28 @@
   }
 
   // Five steps that move vm-web from `from` to `to`. `act` = current active member per node.
+  // Announcements after switchover (same model as SLB Scope): QEMU always sends a RARP; a virtio guest adds a
+  // gratuitous ARP (IPv4) or an unsolicited neighbour advertisement (IPv6-only); ovn-controller announces ≈1–16 s later,
+  // with gratuitous ARPs only if the port has an IPv4 address in OVN (NAD with subnets), RARPs otherwise.
+  let ann = 'virtio', ovnIp = false;
+  const GUEST = { virtio: 'garp', v6: 'nd', rarp: null };
+  function laterAnnouncements(from, to, base, act) {
+    const aTo = act[to], aFrom = act[from], sTo = swOf(aTo), g = GUEST[ann];
+    const k = g || (ovnIp ? 'garp' : 'rarp');
+    const parts = [];
+    if (g === 'garp') parts.push('the guest\'s gratuitous ARP (it answers each of QEMU\'s 5 rounds)');
+    if (g === 'nd') parts.push('the IPv6-only guest\'s unsolicited neighbour advertisement');
+    if (!g) parts.push('QEMU\'s repeated RARPs (the guest cannot announce itself)');
+    parts.push(ovnIp ? 'ovn-controller\'s gratuitous ARPs at ≈1, 2, 4, 8 and 16 s (the port has an IPv4 address in OVN)' : 'ovn-controller\'s RARPs at ≈1, 2, 4, 8 and 16 s (no IP in OVN)');
+    const garp = g === 'garp' || ovnIp;
+    return { clock: fmt(base + 0.052), title: 'Later announcements change nothing', doc: 'QEMU announce-self · OVN', dur: 4200,
+      body: `<p>More announcements follow: ${parts.join(', then ')}. They reach tables that are already right: Node ${from} accepts them on its active member as an ordinary refresh, and reflections land on backups.</p><p>${garp ? `A gratuitous ARP from the local port arms the 5 s GARP lock on Node ${to}, but in active-backup it never matters — reflections never reach the active member.` : 'Unlike SLB, nothing here needs a gratuitous ARP: active-backup has no "looped back" drop for the exception to override.'}</p>`,
+      vm: to,
+      frames: [{ pts: up(to, 'web', aTo), k, t0: 0.05, t1: 0.4, end: null, label: g === 'garp' ? 'GARP' : g === 'nd' ? 'unsolicited NA' : ovnIp ? 'OVN GARP' : 'RARP' }]
+        .concat(flood(sTo, `${to}.${aTo}`, k, abSpec({ act }, { [`${from}.${aFrom}`]: { to: 'local', end: 'ok', note: 'refresh' } }), 0.4, 0.9, { core: true })).concat(podTraffic(0.3, act)),
+      up: garp ? [{ at: 0.15, t: to, k: 'web', v: { port: 'local', lock: true, fresh: true } }] : [],
+      dec: [D('ok', `Node ${from} · ${aFrom} (active)`, 'already <b>bond0</b> → accept, refresh')] };
+  }
   function migrateSteps(from, to, base, act, firstTime) {
     const rev = from === 'B';
     const mig = rev ? MIG.slice().reverse() : MIG;
@@ -203,20 +225,21 @@
         vm: ['move', 0.1, 0.7, rev ? 'rev' : 'fwd'], mig: true,
         frames: podTraffic(0.2, act),
         up: [{ at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: from, k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: to, k: 'web', v: { stale: true } }] },
-      { clock: fmt(base + 0.002), title: `GARP leaves Node ${to} on its active member ${aTo}`, doc: 'Bond packet output', dur: 4000,
-        body: `<p>The gratuitous ARP enters <code>br-phy</code> from the local port: Node ${to} learns <code>vm-web → local</code> (and arms the 5 s GARP lock). There is nothing to choose — it leaves on <code>${aTo}</code>.</p><p>${sTo} sees vm-web on <code>${port}</code> and moves the entry${cross ? ' — a MAC move between the two switches' : ' — a MAC move between two of its ports'}.${indep && cross ? ' core1 records a MAC move too; the other switch will be corrected by the flood.' : ''}</p>`,
+      { clock: fmt(base + 0.05), title: `QEMU's RARP leaves Node ${to} on its active member ${aTo}`, doc: 'QEMU announce-self · Bond packet output', dur: 4000,
+        body: `<p>About 50 ms after resume QEMU announces vm-web with a broadcast <b>RARP</b>. It enters <code>br-phy</code> from the local port: Node ${to} learns <code>vm-web → local</code> (a RARP is not a gratuitous ARP, so no lock is set). There is nothing to choose — it leaves on <code>${aTo}</code>.</p><p>${sTo} sees vm-web on <code>${port}</code> and moves the entry${cross ? ' — a MAC move between the two switches' : ' — a MAC move between two of its ports'}.${indep && cross ? ' core1 records a MAC move too; the other switch will be corrected by the flood.' : ''}</p>`,
         vm: to,
-        frames: [{ pts: up(to, 'web', aTo), k: 'garp', t0: 0.05, t1: 0.75, end: null, label: 'GARP' }].concat(podTraffic(0.3, act)),
-        up: [{ at: 0.18, t: to, k: 'web', v: { port: 'local', lock: true, fresh: true } }, { at: 0.74, t: 'sw', k: 'web', v: { port, fresh: true } }],
+        frames: [{ pts: up(to, 'web', aTo), k: 'rarp', t0: 0.05, t1: 0.75, end: null, label: 'RARP' }].concat(podTraffic(0.3, act)),
+        up: [{ at: 0.18, t: to, k: 'web', v: { port: 'local', fresh: true } }, { at: 0.74, t: 'sw', k: 'web', v: { port, fresh: true } }],
         dec: [D('ok', `${sTo}`, `src vm-web on ${port} (was ${portOld}) → <b>MAC move</b>`)] },
-      { clock: fmt(base + 0.003), title: 'The GARP floods to every port; only active members accept it', doc: 'Bond packet input', dur: 5200,
-        body: `<p>Node ${from} receives the GARP on all four members. The three backups drop it unconditionally; the active member accepts it. Node ${from} still has <code>vm-web → local</code>, but active-backup has no "looped back" check — that exists only in SLB — so it relearns <code>vm-web → bond0</code> like any MAC move.</p><p>Node ${to}'s own reflections land on its backup members and are dropped there; the GARP lock never comes into play.</p>`,
+      { clock: fmt(base + 0.051), title: 'The RARP floods to every port; only active members accept it', doc: 'Bond packet input', dur: 5200,
+        body: `<p>Node ${from} receives the RARP on all four members. The three backups drop it unconditionally; the active member accepts it. Node ${from} still has <code>vm-web → local</code>, but active-backup has no "looped back" check — that exists only in SLB — so the frame type does not matter: it relearns <code>vm-web → bond0</code> like any MAC move.</p><p>Node ${to}'s own reflections land on its backup members and are dropped there.</p>`,
         vm: to,
-        frames: flood(sTo, `${to}.${aTo}`, 'garp', abSpec({ act }, { [`${from}.${aFrom}`]: { to: 'local', end: 'ok', note: 'active' } }), 0.05, 0.75, { core: true }).concat(podTraffic(0.35, act)),
+        frames: flood(sTo, `${to}.${aTo}`, 'rarp', abSpec({ act }, { [`${from}.${aFrom}`]: { to: 'local', end: 'ok', note: 'active' } }), 0.05, 0.75, { core: true }).concat(podTraffic(0.35, act)),
         up: [{ at: 0.66, t: from, k: 'web', v: { port: 'bond0', fresh: true } }],
-        dec: [D('ok', `Node ${from} · ${aFrom} (active)`, 'BM_AB active member → <b>BV_ACCEPT</b>; learn vm-web local → <b>bond0</b>'), D('drop', `Node ${to} · backups`, 'reflected GARP on backup members → <b>drop</b>')] },
-      { clock: fmt(base + 0.01), title: `Converged on Node ${to}`, doc: 'Result', dur: 4000,
-        body: `<p>The gateway reaches vm-web through <code>${port}</code>. One GARP, one MAC move per switch, both nodes corrected in milliseconds — and all of it on a single link per node.</p>`,
+        dec: [D('ok', `Node ${from} · ${aFrom} (active)`, 'BM_AB active member → <b>BV_ACCEPT</b> for any frame type; learn vm-web local → <b>bond0</b>'), D('drop', `Node ${to} · backups`, 'reflected RARP on backup members → <b>drop</b>')] },
+      laterAnnouncements(from, to, base, act),
+      { clock: fmt(base + 0.06), title: `Converged on Node ${to}`, doc: 'Result', dur: 4000,
+        body: `<p>The gateway reaches vm-web through <code>${port}</code>. QEMU's RARP alone moved the MAC on each switch and corrected both nodes in milliseconds — and all of it on a single link per node.</p>`,
         vm: to,
         frames: [{ pts: join(fromCore(sTo), dn(sTo, to, aTo, 'web')), k: 'uni', t0: 0.05, t1: 0.6, end: 'ok', label: 'gw → vm-web' }, { pts: join(up(to, 'web', aTo), toCore(sTo)), k: 'uni', t0: 0.45, t1: 0.95, end: 'ok', label: 'vm-web → gw' }].concat(podTraffic(0.1, act)),
         up: [{ at: 0.1, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }, { at: 0.9, t: 'patch', tb: to, k: 'web', v: { lock: false } }] },
@@ -734,6 +757,7 @@
     S = SCEN.find((x) => x.id === id) || SCEN[0];
     document.querySelectorAll('#scenarios button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === S.id)));
     $('#lifeOpt').hidden = S.id !== 'life';
+    $('#annOpt').hidden = $('#ovnOpt').hidden = !['happy', 'life'].includes(S.id);
     $('#track').innerHTML = S.steps.map((st, k) => `<span class="${S.bad ? 'bad' : ''}" title="${k + 1}. ${st.title.replace(/"/g, '&quot;')}" data-k="${k}"><i></i></span>`).join('');
     T = 0; lastStepIdx = -1; lastTblKey = ''; holdAt = null;
     render();
@@ -773,6 +797,8 @@
     requestAnimationFrame(tick);
   }
   $('#nreb').addEventListener('change', (e) => { nReb = +e.target.value; rebuildScenarios(); load('life', true); });
+  $('#ann').addEventListener('change', (e) => { ann = e.target.value; rebuildScenarios(); load(S.id, false); });
+  $('#ovnIp').addEventListener('change', (e) => { ovnIp = e.target.checked; rebuildScenarios(); load(S.id, false); });
   $('#loop').addEventListener('change', (e) => { if (!e.target.checked) cancelLoop(); else if (!playing && T >= S.total - 2) scheduleLoop(); });
   $('#modeSeg').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
@@ -803,6 +829,8 @@
   $('#risks').innerHTML = RISKS.map((r) => `<div class="risk"><h4><span class="pill ${r.sev}">${r.tag}</span>${r.title}</h4><div>${r.html}</div><button class="jump" data-id="${r.scen}">Show in visualization →</button></div>`).join('');
   $('#risks').addEventListener('click', (e) => { const b = e.target.closest('.jump'); if (!b) return; load(b.dataset.id, true); window.scrollTo({ top: 0, behavior: 'smooth' }); });
 
+  // browsers may restore form values on reload/back; keep the controls in step with the model
+  $('#ann').value = ann; $('#ovnIp').checked = ovnIp;
   buildNav();
   const hash = location.hash.replace('#', '');
   load(SCEN.some((s) => s.id === hash) ? hash : 'happy', false);

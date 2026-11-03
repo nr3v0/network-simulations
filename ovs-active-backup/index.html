@@ -37,6 +37,10 @@
         <label class="sel" id="lifeOpt" hidden><span>Failovers</span>
           <select id="nreb" aria-label="Number of failovers before the second migration"><option value="0">0</option><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option></select>
         </label>
+        <label class="sel" id="annOpt" hidden><span>Announcement</span>
+          <select id="ann" aria-label="What vm-web's new host sends after switchover"><option value="virtio" selected>RARP + GARP (virtio, IPv4 guest)</option><option value="v6">RARP + neighbour advert (IPv6-only guest)</option><option value="rarp">RARP only (guest cannot announce)</option></select>
+        </label>
+        <label class="chk" id="ovnOpt" hidden title="ovn-controller sends gratuitous ARPs only for ports with an IPv4 address in OVN, which OVN-Kubernetes sets when the localnet NAD defines subnets"><input type="checkbox" id="ovnIp" /> <span>OVN knows the IP (NAD subnets)</span></label>
       </div>
 
     <div class="btns">
@@ -70,6 +74,7 @@
         <span><i class="dot k-bcast"></i>ARP broadcast</span>
         <span><i class="dot k-garp"></i>Gratuitous ARP</span>
         <span><i class="dot k-rarp"></i>RARP</span>
+        <span><i class="dot k-nd"></i>Neighbour advertisement</span>
         <span><i class="dot k-mig"></i>Migration copy</span>
         <span><i class="sq"></i>Pod network (node MAC via br-ex)</span>
         <span><i class="mk ok">✓</i>Accepted</span>
@@ -107,6 +112,7 @@
           <li>Active member starts as eno1 on both nodes; on failover OVS is modelled as choosing the next member in order (eno1 → eno2 → eno3 → eno4). Real selection honours <span class="mono">bond-primary</span> and member priority.</li>
           <li>On failover OVS sends one learning RARP per MAC learned on a non-bond port (VMs and the node MAC) out the new active member, per the OVS bonding docs.</li>
           <li>The <b>pods</b> square stands for all Kubernetes pod-network traffic on the node (node MAC via <span class="mono">br-ex</span>); like everything else it uses the active member.</li>
+          <li><b>Announcement</b> (happy path, lifecycle): QEMU always sends a RARP first; a virtio guest adds a gratuitous ARP (IPv4) or an unsolicited neighbour advertisement (IPv6-only); <b>OVN knows the IP</b> makes ovn-controller's announcements at ≈1–16 s gratuitous ARPs instead of RARPs. In active-backup the choice never changes the outcome — there is no SLB "looped back" drop — so the control exists to compare side by side with SLB Scope.</li>
           <li>Timeline is compressed: animation time is not wall-clock. The clock shows real elapsed time.</li>
         </ul>
         <h3>Sources</h3>

@@ -37,6 +37,10 @@
         <label class="sel" id="lifeOpt" hidden><span>Rebalances</span>
           <select id="nreb" aria-label="Number of hash rebalances before the second migration"><option value="0">0</option><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select>
         </label>
+        <label class="sel" id="annOpt" hidden><span>Announcement</span>
+          <select id="ann" aria-label="What vm-web's new host sends after switchover"><option value="virtio" selected>RARP + GARP (virtio, IPv4 guest)</option><option value="v6">RARP + neighbour advert (IPv6-only guest)</option><option value="rarp">RARP only (guest cannot announce)</option></select>
+        </label>
+        <label class="chk" id="ovnOpt" hidden title="ovn-controller sends gratuitous ARPs only for ports with an IPv4 address in OVN, which OVN-Kubernetes sets when the localnet NAD defines subnets"><input type="checkbox" id="ovnIp" /> <span>OVN knows the IP (NAD subnets)</span></label>
       </div>
 
     <div class="btns">
@@ -70,6 +74,7 @@
         <span><i class="dot k-bcast"></i>ARP broadcast</span>
         <span><i class="dot k-garp"></i>Gratuitous ARP</span>
         <span><i class="dot k-rarp"></i>RARP</span>
+        <span><i class="dot k-nd"></i>Neighbour advertisement</span>
         <span><i class="dot k-mig"></i>Migration copy</span>
         <span><i class="sq"></i>Pod network (node MAC via br-ex)</span>
         <span><i class="mk ok">✓</i>Accepted</span>
@@ -107,17 +112,24 @@
           <li>The <b>pods</b> square stands for all Kubernetes pod-network traffic on the node: OVN-Kubernetes sends it through <span class="mono">br-ex</span> with the node's MAC, so it is one MAC → one bucket → one member, never balanced.</li>
           <li>Hash bucket assignments (vm-web → eno2 on Node A, eno3 on Node B) are illustrative; the real bucket is <span class="mono">hash(src MAC, VLAN)</span> into 256 entries and is assigned arbitrarily on first use.</li>
           <li>Active member is eno1 on both nodes (first member enabled). OVS only names it deterministically "by accident"; check with <span class="mono">ovs-appctl bond/show</span>.</li>
+          <li><b>Announcement</b> (happy path, lifecycle, #3 and the second-move edge case): QEMU always sends a RARP about 50 ms after resume and repeats it in 5 rounds over ≈1.25 s; a virtio guest with guest-announce answers each round with a gratuitous ARP (IPv4) or an unsolicited neighbour advertisement (IPv6-only). <b>OVN knows the IP</b> adds ovn-controller's announcements ≈1, 2, 4, 8 and 16 s after OVN-Kubernetes enables the port at switchover — gratuitous ARPs when the port has an IPv4 address (localnet NAD with subnets), RARPs otherwise. Control-plane delay before the first one is not modelled.</li>
           <li>Timeline is compressed: animation time is not wall-clock. The clock shows real elapsed time.</li>
         </ul>
         <h3>Sources</h3>
         <ul class="src">
-          <li><a href="https://docs.openvswitch.org/en/stable/topics/bonding/" target="_blank" rel="noopener noreferrer">Open vSwitch — Bonding (SLB complications 1–5)</a></li>
+          <li><a href="https://docs.openvswitch.org/en/stable/topics/bonding/" target="_blank" rel="noopener noreferrer">Open vSwitch — Bonding (SLB complications 0–4)</a></li>
           <li><a href="https://github.com/openvswitch/ovs/blob/master/ofproto/bond.c" target="_blank" rel="noopener noreferrer">OVS source — ofproto/bond.c (admissibility, learning packets)</a></li>
           <li><a href="https://github.com/openvswitch/ovs/blob/master/ofproto/ofproto-dpif-xlate.c" target="_blank" rel="noopener noreferrer">OVS source — ofproto-dpif-xlate.c (is_gratuitous_arp, BV_DROP_IF_MOVED)</a></li>
           <li><a href="https://github.com/openvswitch/ovs/blob/master/lib/mac-learning.h" target="_blank" rel="noopener noreferrer">OVS source — lib/mac-learning.h (300 s idle, 5 s GARP lock, 8192 entries)</a></li>
           <li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/advanced_networking/network-bonding-considerations" target="_blank" rel="noopener noreferrer">Red Hat OCP 4.22 — Network bonding considerations (balance-slb on br-phy)</a></li>
           <li><a href="https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html" target="_blank" rel="noopener noreferrer">QEMU QMP — announce-self (broadcast RARP after migration)</a></li>
           <li><a href="https://mail.openvswitch.org/pipermail/ovs-dev/2019-September/362322.html" target="_blank" rel="noopener noreferrer">OVN — GARP for localnet VIFs with known IP, RARP otherwise</a></li>
+          <li><a href="https://github.com/ovn-org/ovn/blob/main/controller/garp_rarp.c" target="_blank" rel="noopener noreferrer">OVN source — controller/garp_rarp.c (GARP if the port has IPv4, else RARP; first after 1 s)</a></li>
+          <li><a href="https://github.com/ovn-org/ovn/blob/main/controller/pinctrl.c" target="_blank" rel="noopener noreferrer">OVN source — controller/pinctrl.c send_garp_rarp() (backoff doubles to 16 s, at most 5 announcements)</a></li>
+          <li><a href="https://github.com/openshift/ovn-kubernetes/blob/main/go-controller/pkg/ovn/base_network_controller_pods.go" target="_blank" rel="noopener noreferrer">OVN-Kubernetes — LSP addresses are "MAC IP…" only when the pod annotation has IPs</a></li>
+          <li><a href="https://github.com/openshift/ovn-kubernetes/blob/main/go-controller/pkg/ovn/base_network_controller_user_defined.go" target="_blank" rel="noopener noreferrer">OVN-Kubernetes — migration target LSP enabled only when the target domain is ready</a></li>
+          <li><a href="https://github.com/qemu/qemu/blob/master/net/announce.c" target="_blank" rel="noopener noreferrer">QEMU source — net/announce.c (RARP, plus the NIC's own announce: virtio guest-announce)</a></li>
+          <li><a href="https://github.com/torvalds/linux/blob/master/net/ipv6/ndisc.c" target="_blank" rel="noopener noreferrer">Linux — NETDEV_NOTIFY_PEERS: gratuitous ARP for IPv4, unsolicited NA for IPv6</a></li>
           <li><a href="https://raft.github.io/" target="_blank" rel="noopener noreferrer">Design inspiration — RaftScope (raft.github.io)</a></li>
         </ul>
       </div>

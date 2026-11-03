@@ -140,6 +140,174 @@
   /* ---------------- Decision trace helpers ---------------- */
   const D = (cls, where, html) => ({ cls, where, html });
 
+  /* ---------------- Post-migration announcements ---------------- */
+  // What leaves the new host after switchover. QEMU always sends a broadcast RARP (first round ≈50 ms after resume,
+  // 5 rounds over ≈1.25 s). A virtio guest that negotiated guest-announce also answers each round with a gratuitous ARP
+  // (IPv4) or an unsolicited neighbour advertisement (IPv6-only). ovn-controller announces the port ≈1 s after
+  // OVN-Kubernetes enables it at switchover, then at +2, +4, +8 and +16 s: a gratuitous ARP if the port has an IPv4
+  // address in OVN (localnet NAD with subnets), a RARP otherwise. Only an ARP-ethertype GARP gets the SLB exception
+  // and arms the 5 s lock.
+  let ann = 'virtio', ovnIp = false;
+  const GUEST = { virtio: 'garp', v6: 'nd', rarp: null };
+  const guestGarp = () => GUEST[ann] === 'garp';
+  const anyGarp = () => guestGarp() || ovnIp;
+  const lockEnd = () => (ovnIp ? 21 : 6.3); // 5 s after the last local GARP: OVN's at +16 s, or the guest's in QEMU's last round
+  const tfmt = (sec) => `T+${Number.isInteger(sec) ? sec : sec.toFixed(3)} s`;
+  const annDesc = () => ({
+    virtio: 'QEMU\'s RARP, then the guest\'s gratuitous ARP',
+    v6: 'QEMU\'s RARP, then the IPv6-only guest\'s unsolicited neighbour advertisement',
+    rarp: 'only QEMU\'s RARP (the guest cannot announce itself)',
+  })[ann];
+  const reflect = (from, to) => ({ [`${from}.eno1`]: { to: 'adm', end: 'drop', note: 'looped back' }, [`${to}.eno1`]: { to: 'adm', end: 'drop', note: 'looped back' } });
+
+  // Announcement steps after vm-web resumes on `to` (bucket on `member`), then the result. Options: pods (background
+  // pod traffic), firstTime (bucket narration), lockStep (separate lock-expiry step), recovery (aging step if stranded).
+  function announceSteps(from, to, member, base, o = {}) {
+    const sw = swOf(member), port = `${to}·${member}`, hTo = to === 'A' ? 'hA' : 'hB';
+    const pt = (x) => (o.pods ? podTraffic(x) : []);
+    const g = GUEST[ann];
+    const coreP = indep ? '<p>With no peer-link the flood transits core1, which records a MAC move, and the other switch relearns vm-web via its uplink.</p>' : '';
+    const bucket = o.firstTime === false ? ' (bucket state from the earlier stay is not reused — assignment is arbitrary again)' : ' on first use';
+    const ovnRarp = ovnIp ? '' : '<p>ovn-controller also announces the port about 1, 2, 4, 8 and 16 s after switchover — with RARPs, because vm-web\'s port has no IP in OVN (the localnet NAD has no subnets). They meet the same fate.</p>';
+    const steps = [
+      { clock: tfmt(base + 0.05), title: `QEMU's RARP leaves Node ${to} on ${member} — learned locally, no lock`, doc: 'QEMU announce-self · SLB complication #3', dur: 4000,
+        body: `<p>About 50 ms after resume QEMU announces vm-web with a broadcast <b>RARP</b> (ethertype 0x8035). It enters <code>br-phy</code> from the local port, so Node ${to} learns <code>vm-web → local</code>. <code>is_gratuitous_arp()</code> matches only ARP frames, so <b>no lock</b> is set.</p><p>The bond assigns vm-web's bucket to <code>${member}</code>${bucket}; ${sw} learns <code>vm-web → ${port}</code>. For the switches a RARP is enough.</p>`,
+        vm: to,
+        frames: [{ pts: up(to, 'web', member), k: 'rarp', t0: 0.05, t1: 0.75, end: null, label: 'RARP' }].concat(pt(0.3)),
+        up: [{ at: 0.18, t: to, k: 'web', v: { port: 'local', fresh: true } }, { at: 0.4, t: hTo, k: 'web', v: member }, { at: 0.74, t: 'sw', k: 'web', v: { port, fresh: true } }],
+        dec: [D('warn', `Node ${to} br-phy · ingress local`, 'RARP is not ARP → learn <code>vm-web → local</code>, <b>no GARP lock</b>'), D('ok', `Node ${to} bond0 · output`, `hash(vm-web) → <b>${member}</b>`)] },
+      { clock: tfmt(base + 0.051), title: 'The RARP floods — both nodes drop it as a reflection', doc: 'SLB complications #1, #2, #3', dur: 5000,
+        body: `<p><b>Node ${from}</b> still has vm-web learned on its <i>local</i> port, so a frame from vm-web arriving on the bond looks like its own traffic looping back. A RARP gets no exception: <b>dropped</b> — and dropped frames never reach MAC learning. <b>Node ${to}</b> drops its own reflection on the active member for the same reason; every other member drops it as non-active.</p>${coreP}${ovnRarp}`,
+        vm: to,
+        frames: flood(sw, `${to}.${member}`, 'rarp', reflect(from, to), 0.05, 0.75, { core: true }).concat(pt(0.35)),
+        up: [{ at: 0.6, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }, { at: 0.66, t: 'patch', tb: from, k: 'web', v: { stale: false, wrong: true } }],
+        dec: [D('drop', `Node ${from} · eno1 (active)`, 'broadcast on active ✓ · src vm-web learned on <b>local</b> ≠ bond0 · not a GARP → <b>drop</b> — <code>SLB bond thinks this packet looped back</code>'), D('drop', `Node ${to} · eno1 (active)`, 'own RARP reflected · src learned on local → <b>drop</b>')] },
+    ];
+    if (g === 'nd') steps.push({ clock: tfmt(base + 0.052), title: 'The guest\'s neighbour advertisement — same fate', doc: 'SLB complication #3', dur: 4600,
+      body: `<p>QEMU also asks the guest to announce itself. An IPv6-only guest sends an <b>unsolicited neighbour advertisement</b> to the all-nodes multicast group. It is accepted only on active members and is not an ARP frame, so Node ${from} drops it as a reflection exactly like the RARP.</p>`,
+      vm: to,
+      frames: [{ pts: up(to, 'web', member), k: 'nd', t0: 0.05, t1: 0.4, end: null, label: 'unsolicited NA' }].concat(flood(sw, `${to}.${member}`, 'nd', reflect(from, to), 0.4, 0.9, { core: true })).concat(pt(0.3)),
+      dec: [D('drop', `Node ${from} · eno1 (active)`, 'src vm-web learned on <b>local</b> · not an ARP frame → <b>drop</b>')] });
+    if (g === 'garp') steps.push(
+      { clock: tfmt(base + 0.052), title: `The guest's gratuitous ARP leaves Node ${to} — the lock is armed`, doc: 'SLB complication #4', dur: 4000,
+        body: `<p>QEMU also asks the virtio guest to announce itself, and a Linux guest sends a <b>gratuitous ARP</b> for its IPv4 address. It enters <code>br-phy</code> from the local port, so Node ${to} keeps <code>vm-web → local</code> and <b>locks the entry for 5 s</b> against gratuitous ARPs arriving on the bond.</p>`,
+        vm: to,
+        frames: [{ pts: up(to, 'web', member), k: 'garp', t0: 0.05, t1: 0.75, end: null, label: 'GARP' }].concat(pt(0.3)),
+        up: [{ at: 0.18, t: to, k: 'web', v: { port: 'local', lock: true, fresh: true } }],
+        dec: [D('ok', `Node ${to} br-phy · ingress local`, 'gratuitous ARP on a <b>non-bond</b> port → set <b>GARP lock (5 s)</b>')] },
+      { clock: tfmt(base + 0.053), title: `The gratuitous ARP floods — Node ${from} accepts the move`, doc: 'SLB complications #1, #3, #4', dur: 5200,
+        body: `<p><b>Node ${from}</b> accepts it on its active member. vm-web is still learned <i>local</i> there — normally "loop, drop" — but a gratuitous ARP is the exception, so it relearns <code>vm-web → bond0</code>. <b>Node ${to}</b> drops its own reflection: the entry is locked. Without the lock Node ${to} would relearn its own VM on the bond.</p>${coreP}`,
+        vm: to,
+        frames: flood(sw, `${to}.${member}`, 'garp', { [`${from}.eno1`]: { to: 'local', end: 'ok', note: 'GARP exception' }, [`${to}.eno1`]: { to: 'adm', end: 'drop', note: 'locked' } }, 0.05, 0.75, { core: true }).concat(pt(0.35)),
+        up: [{ at: 0.66, t: from, k: 'web', v: { port: 'bond0', fresh: true } }],
+        dec: [D('ok', `Node ${from} · eno1 (active)`, 'broadcast on active ✓ · src vm-web learned on <b>local</b> ≠ bond0 · is GARP ✓ · not locked → <b>admit, relearn → bond0</b>'), D('drop', `Node ${to} · eno1 (active)`, 'src learned on <b>local</b> · is GARP ✓ · entry <b>GARP-locked</b> → <b>drop</b> (complication #4)')] });
+    if (ovnIp) steps.push({ clock: `≈${tfmt(base + 1)}`, title: g === 'garp' ? 'ovn-controller\'s gratuitous ARP renews the lock' : `ovn-controller's gratuitous ARP fixes Node ${from}`, doc: 'OVN garp_rarp · SLB complication #3', dur: 5200,
+      body: `<p>OVN-Kubernetes enables vm-web's port on Node ${to} at switchover. About 1 s later (plus control-plane delay) ovn-controller sends a <b>gratuitous ARP</b> for the port's IPv4 address — the localnet NAD has subnets, so OVN knows the IP. It enters <code>br-phy</code> from the local port, so Node ${to} ${g === 'garp' ? 'renews' : 'arms'} the 5 s lock.</p><p>${g === 'garp' ? `Node ${from} already has vm-web on bond0 and accepts it normally.` : `<b>This is the frame that fixes Node ${from}</b>: the gratuitous ARP exception applies and it relearns <code>vm-web → bond0</code>. For about a second vm-web was cut off from Node ${from}.`} ovn-controller repeats at about +2, +4, +8 and +16 s, and each one renews the lock on Node ${to}.</p>${coreP}`,
+      vm: to,
+      frames: [{ pts: up(to, 'web', member), k: 'garp', t0: 0.05, t1: 0.4, end: null, label: 'OVN GARP' }].concat(flood(sw, `${to}.${member}`, 'garp', { [`${from}.eno1`]: { to: 'local', end: 'ok', note: g === 'garp' ? 'accepted' : 'GARP exception' }, [`${to}.eno1`]: { to: 'adm', end: 'drop', note: 'locked' } }, 0.4, 0.9, { core: true })).concat(pt(0.3)),
+      up: [{ at: 0.15, t: to, k: 'web', v: { port: 'local', lock: true, fresh: true } }].concat(g === 'garp' ? [] : [{ at: 0.85, t: from, k: 'web', v: { port: 'bond0', fresh: true } }]),
+      dec: [D('ok', `Node ${to} br-phy · ingress local`, `gratuitous ARP from ovn-controller on a <b>non-bond</b> port → ${g === 'garp' ? 'renew' : 'set'} <b>GARP lock</b>`), D('ok', `Node ${from} · eno1 (active)`, g === 'garp' ? 'src vm-web learned on <b>bond0</b> = ingress → <b>admit</b>' : 'src vm-web learned on <b>local</b> · is GARP ✓ · not locked → <b>admit, relearn → bond0</b>')] });
+    if (!anyGarp()) return steps.concat(strandedSteps(from, to, member, base, o));
+    steps.push({ clock: (g === 'garp' ? '' : '≈') + tfmt(base + (g === 'garp' ? 0.06 : 1.01)), title: `Converged on Node ${to}`, doc: 'Result', dur: 4400,
+      body: `<p>The gateway reaches vm-web through ${sw} → <code>${port}</code>${to === 'B' ? `, and vm-x on Node A now looks up vm-web → <code>bond0</code>, so its frames cross the fabric to ${port}` : ''}. ${g === 'garp' ? 'The guest\'s gratuitous ARP fixed the switches and both nodes within milliseconds; QEMU\'s RARP only taught the switches.' : `Node ${from} was cut off from vm-web until ovn-controller's gratuitous ARP arrived, about a second after switchover.`}</p>${o.pods ? '<p>Pod traffic never noticed: it never shares a bucket with vm-web.</p>' : ''}`,
+      vm: to,
+      frames: [{ pts: join(fromCore(sw), dn(sw, to, member, 'web')), k: 'uni', t0: 0.05, t1: 0.6, end: 'ok', label: 'gw → vm-web' }]
+        .concat(to === 'B' ? [{ pts: join(up('A', 'x', 'eno4'), dn('sw2', 'B', member, 'web')), k: 'uni', t0: 0.3, t1: 0.9, end: 'ok', label: 'vm-x → vm-web' }] : [{ pts: join(up(to, 'web', member), toCore(sw)), k: 'uni', t0: 0.45, t1: 0.95, end: 'ok', label: 'vm-web → gw' }]).concat(pt(0.1)),
+      up: [{ at: 0.1, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }].concat(o.lockStep ? [] : [{ at: 0.9, t: 'patch', tb: to, k: 'web', v: { lock: false } }]) });
+    if (o.lockStep) steps.push({ clock: `≈${tfmt(base + lockEnd())}`, title: 'GARP lock expires', doc: 'SLB complication #4', dur: 3400,
+      body: `<p>The lock ends 5 s after the last gratuitous ARP from the local port: ${ovnIp ? 'ovn-controller\'s last one at about +16 s, so it lasts until about <b>T+21 s</b>' : 'the guest\'s answer to QEMU\'s fifth round, about 1.25 s after resume, so it lasts until about <b>T+6.3 s</b>'}. Until then Node ${to} ignores every gratuitous ARP for vm-web arriving on the bond — a genuine one too, if vm-web moves again (see <i>second move inside the lock</i>).</p><p>From here the entry is refreshed by vm-web's own traffic and ages out after <code>mac-aging-time</code> idle (default 300 s).</p>`,
+      vm: to, up: [{ at: 0.3, t: 'patch', tb: to, k: 'web', v: { lock: false } }] });
+    return steps;
+  }
+  // The old node `from` keeps vm-web as local: nothing but non-GARP announcements reached it.
+  function strandedSteps(from, to, member, base, o = {}) {
+    const sw = swOf(member);
+    const pt = (x) => (o.pods ? podTraffic(x) : []);
+    const [peer, peerEno, peerName] = from === 'A' ? ['x', 'eno4', 'vm-x'] : ['pods', 'eno1', 'pods-B'];
+    const steps = [
+      { clock: tfmt(base + 0.06), title: 'North-south works — so it looks "mostly fine"', doc: 'SLB complication #3', dur: 3600,
+        body: `<p>The gateway reaches vm-web via ${sw} → <code>${to}·${member}</code>: the RARP was enough for the switches. Monitoring from outside the cluster may show no outage at all.</p>`,
+        vm: to,
+        frames: [{ pts: join(fromCore(sw), dn(sw, to, member, 'web')), k: 'uni', t0: 0.05, t1: 0.75, end: 'ok', label: 'gw → vm-web' }].concat(pt(0.2)) },
+      { clock: tfmt(base + 0.07), title: `Node ${from} black-holes vm-web in both directions`, doc: 'SLB complication #3', dur: 5400,
+        body: `<p><b>${peerName} → vm-web</b>${from === 'A' ? ' and <b>pods → vm-web</b>' : ''}: Node ${from}'s br-phy looks up vm-web → <code>local</code>, the port the frames came in on, and discards them.</p><p><b>vm-web → ${peerName}</b>: the reply arrives on ${from}·${peerEno}; source vm-web is "learned elsewhere" → dropped as a loop. So vm-web's own traffic cannot correct the entry either.</p>`,
+        vm: to,
+        frames: [{ pts: localUp(from, peer), k: from === 'A' ? 'uni' : 'pod', t0: 0.05, t1: 0.4, end: 'drop', note: 'dst = in-port', label: `${peerName} → vm-web` }]
+          .concat(from === 'A' ? [{ pts: localUp('A', 'pods'), k: 'pod', t0: 0.15, t1: 0.5, end: 'drop', label: 'pods → vm-web' }] : [])
+          .concat([{ pts: join(up(to, 'web', member), dn(sw, from, peerEno, 'adm')), k: 'uni', t0: 0.35, t1: 0.9, end: 'drop', note: 'looped back', label: `vm-web → ${peerName}` }]),
+        dec: [D('drop', `Node ${from} br-phy · from ${peerName}`, 'dst vm-web → <b>local</b> = ingress port → not forwarded'), D('drop', `Node ${from} · ${peerEno}`, 'unicast, src vm-web learned on <b>local</b> ≠ bond0 → <b>drop</b>')] },
+    ];
+    if (o.recovery) steps.push({ clock: 'T+mac-aging-time', title: `Recovery only when Node ${from}’s entry ages out`, doc: 'SLB complication #3', dur: 4200,
+      body: `<p>The OVS doc cites a delay of up to 60 s. In current OVS the window is the bridge's <code>mac-aging-time</code> (upstream default <b>300 s</b>, range 15–3600 s) counted from vm-web's last frame on Node ${from} — the dropped frames never refresh or fix it.</p><p>Once the entry expires, ${peerName}'s next frame floods out the bond, reaches vm-web, and the reply is learned correctly on bond0.</p>`,
+      vm: to,
+      frames: [{ pts: join(up(from, peer, peerEno), dn(swOf(peerEno), to, member, 'web')), k: from === 'A' ? 'uni' : 'pod', t0: 0.35, t1: 0.9, end: 'ok', label: `${peerName} → vm-web` }],
+      up: [{ at: 0.2, t: from, k: 'web', v: null }, { at: 0.95, t: from, k: 'web', v: { port: 'bond0', fresh: true } }] });
+    else steps[steps.length - 1].body += `<p>This lasts until Node ${from}'s entry ages out (<code>mac-aging-time</code>, default 300 s).</p>`;
+    return steps;
+  }
+
+  // Edge case: vm-web lands on Node B, then migrates back to Node A at T+3.5 s, inside Node B's lock window.
+  function relockSteps() {
+    const g = guestGarp(), any = anyGarp();
+    const back = 3.5, lockB = ovnIp ? 7 : 6.3, fixAt = back + 4; // B's lock: guest GARPs to ≈1.25 s, OVN's at +1, +2 s (+5 s); A's OVN GARPs at +1, +2, +4 s
+    const k1 = any ? 'garp' : 'rarp', kA = g ? 'garp' : 'rarp';
+    const why = (k) => (k === 'garp' ? 'locked' : 'looped back');
+    const ovnLate = ovnIp ? `<p>ovn-controller on Node A sends gratuitous ARPs about 1 s and 2 s after the return (≈T+${back + 1} s and ≈T+${back + 2} s): both arrive while Node B is still locked.</p>` : '';
+    const steps = [
+      { clock: g || !ovnIp ? 'T+0.050 s' : '≈T+1 s', title: any ? 'vm-web lands on Node B — the lock is armed' : 'vm-web lands on Node B — no gratuitous ARP, no lock', doc: 'SLB complication #4', dur: 5200,
+        body: any
+          ? `<p>vm-web has just migrated A → B. ${g ? 'The guest\'s gratuitous ARP' : 'ovn-controller\'s gratuitous ARP, about 1 s after switchover,'} enters <code>br-phy</code> from the local port, so Node B locks <code>vm-web → local</code>; Node A accepts it via the gratuitous ARP exception and moves vm-web to bond0.</p><p>Every further local gratuitous ARP renews the lock${g ? ' — the guest answers each of QEMU\'s 5 rounds (≈1.25 s)' : ''}${ovnIp ? `${g ? ', and' : ' —'} ovn-controller repeats at +2 s, +4 s… while vm-web stays` : ''}. Here Node B's lock runs until about <b>T+${lockB} s</b>.</p>`
+          : `<p>vm-web has just migrated A → B, announced only by RARP${ann === 'v6' ? ' and a neighbour advertisement' : ''}. Node B learns it locally without a lock. Node A drops the announcement as a reflection and is already stranded (complication #3).</p>`,
+        vm: 'B',
+        frames: [{ pts: up('B', 'web', 'eno3'), k: k1, t0: 0.05, t1: 0.4, end: null, label: g ? 'GARP' : ovnIp ? 'OVN GARP' : 'RARP' }]
+          .concat(flood('sw2', 'B.eno3', k1, { 'A.eno1': any ? { to: 'local', end: 'ok', note: 'GARP exception' } : { to: 'adm', end: 'drop', note: 'looped back' }, 'B.eno1': { to: 'adm', end: 'drop', note: why(k1) } }, 0.4, 0.9, { core: true })),
+        up: [{ at: 0.15, t: 'B', k: 'web', v: { port: 'local', fresh: true, lock: any } }, { at: 0.3, t: 'hB', k: 'web', v: 'eno3' }, { at: 0.4, t: 'sw', k: 'web', v: { port: 'B·eno3', fresh: true } },
+          any ? { at: 0.85, t: 'A', k: 'web', v: { port: 'bond0', fresh: true } } : { at: 0.85, t: 'patch', tb: 'A', k: 'web', v: { stale: false, wrong: true } }] },
+      { clock: `T+${back} s`, whatif: 'Edge case — a second live migration within seconds of the first', title: any ? 'vm-web migrates back to Node A before Node B\'s lock expires' : 'vm-web migrates back to Node A', doc: 'Setup', dur: 3600,
+        body: `<p>Something moves vm-web again almost at once: a descheduler or rebalancing policy, a drain that bounces it, or an operator retrying. A small, mostly idle VM can finish a live migration in a few seconds.</p><p>vm-web resumes on Node A at <b>T+${back} s</b>.${any ? ` Node B's lock on vm-web still runs until about T+${lockB} s.` : ''}</p>`,
+        vm: ['move', 0.1, 0.7, 'rev'], mig: true,
+        up: [{ at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: 'B', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: 'A', k: 'web', v: { stale: true } }, { at: 0.7, t: 'hB', k: 'web', v: null }] },
+      { clock: tfmt(back + 0.05), title: 'Node A announces vm-web', doc: 'QEMU announce-self', dur: 4000,
+        body: `<p>vm-web announces itself from Node A: ${annDesc()}. The frames enter Node A's <code>br-phy</code> from the local port, so Node A learns <code>vm-web → local</code>${g ? ' and locks it' : ''}; the bucket goes to <code>eno2</code> and sw1 learns <code>vm-web → A·eno2</code>.</p>`,
+        vm: 'A',
+        frames: [{ pts: up('A', 'web', 'eno2'), k: kA, t0: 0.05, t1: 0.75, end: null, label: kA === 'garp' ? 'GARP' : 'RARP' }],
+        up: [{ at: 0.18, t: 'A', k: 'web', v: { port: 'local', fresh: true, lock: g } }, { at: 0.4, t: 'hA', k: 'web', v: 'eno2' }, { at: 0.74, t: 'sw', k: 'web', v: { port: 'A·eno2', fresh: true } }] },
+      { clock: tfmt(back + 0.06), title: kA === 'garp' ? 'Node B ignores the move — its lock is still running' : 'Node B drops the move as a reflection', doc: 'SLB complication #4', dur: 5600,
+        body: (kA === 'garp'
+          ? `<p>The gratuitous ARP reaches Node B's active member. vm-web is learned <i>local</i> there and the frame is a gratuitous ARP, so the exception would admit it — but the entry is still <b>locked</b> (until ≈T+${lockB} s). OVS cannot tell this genuine move from a reflection of Node B's own announcement, so it drops it. QEMU's RARP just before it was dropped as a reflection.</p>`
+          : `<p>The RARP${ann === 'v6' ? ' and the neighbour advertisement' : ''} reach Node B's active member. vm-web is learned <i>local</i> there and neither is a gratuitous ARP, so OVS drops them as reflections.</p>`)
+          + `<p><b>Node B keeps <code>vm-web → local</code></b> although vm-web is now on Node A.</p>${ovnLate}`,
+        vm: 'A',
+        frames: flood('sw1', 'A.eno2', kA, { 'B.eno1': { to: 'adm', end: 'drop', note: why(kA) }, 'A.eno1': { to: 'adm', end: 'drop', note: why(kA) } }, 0.05, 0.75, { core: true }),
+        up: [{ at: 0.6, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }, { at: 0.66, t: 'patch', tb: 'B', k: 'web', v: { stale: false, wrong: true } }],
+        dec: [D('drop', 'Node B · eno1 (active)', kA === 'garp' ? 'src vm-web learned on <b>local</b> · is GARP ✓ · <code>mac_entry_is_grat_arp_locked()</code> ✓ → <b>drop</b>' : 'src vm-web learned on <b>local</b> · not a GARP → <b>drop</b> (looped back)')] },
+    ];
+    const toB = join(up('B', 'pods', 'eno1'), dn('sw1', 'A', 'eno2', 'web'));
+    if (ovnIp) steps.push(
+      { clock: `≈T+${fixAt} s`, title: 'ovn-controller on Node A tries again — after Node B\'s lock', doc: 'OVN garp_rarp · SLB complication #3', dur: 5200,
+        body: `<p>ovn-controller's third gratuitous ARP from Node A (≈4 s after the return) arrives after Node B's lock ended at ≈T+${lockB} s. Now the exception applies and Node B relearns <code>vm-web → bond0</code>.</p><p>vm-web was unreachable from Node B's workloads for about 4 s. Without OVN knowing vm-web's IP, nothing would have corrected Node B before <code>mac-aging-time</code>.</p>`,
+        vm: 'A',
+        frames: [{ pts: up('A', 'web', 'eno2'), k: 'garp', t0: 0.05, t1: 0.4, end: null, label: 'OVN GARP' }].concat(flood('sw1', 'A.eno2', 'garp', { 'B.eno1': { to: 'local', end: 'ok', note: 'lock expired' }, 'A.eno1': { to: 'adm', end: 'drop', note: 'locked' } }, 0.4, 0.9, { core: true })),
+        up: [{ at: 0.02, t: 'patch', tb: 'B', k: 'web', v: { lock: false } }, { at: 0.15, t: 'A', k: 'web', v: { port: 'local', fresh: true, lock: true } }, { at: 0.85, t: 'B', k: 'web', v: { port: 'bond0', fresh: true } }],
+        dec: [D('ok', 'Node B · eno1 (active)', 'src vm-web learned on <b>local</b> · is GARP ✓ · lock expired → <b>admit, relearn → bond0</b>')] },
+      { clock: `≈T+${fixAt + 0.01} s`, title: 'Converged — about 4 s late', doc: 'Result', dur: 3600,
+        body: '<p>Pods on Node B reach vm-web again: Node B now looks up vm-web → <code>bond0</code> and sw1 delivers to A·eno2.</p>',
+        vm: 'A',
+        frames: [{ pts: toB, k: 'pod', t0: 0.05, t1: 0.75, end: 'ok', label: 'pods-B → vm-web' }] });
+    else steps.push(
+      { clock: tfmt(back + 0.07), title: 'Node B black-holes vm-web for its own workloads', doc: 'SLB complication #3', dur: 5400,
+        body: `<p>Pods (and any VM) on Node B that talk to vm-web are cut off: Node B's br-phy looks up vm-web → <code>local</code>, the port the frames came in on, and discards them. vm-web's replies arrive on B·eno1 with a source learned locally and are dropped as reflections, so even vm-web's own traffic cannot correct the entry.</p><p>${any ? 'The lock caused this: without it, Node A\'s gratuitous ARP would have moved the entry. With no OVN-known IP there is no later gratuitous ARP to try again.' : 'The lock played no part here: only RARPs were ever sent, so Node B — like Node A after the first move — is stranded either way.'}</p>`,
+        vm: 'A',
+        frames: [{ pts: localUp('B', 'pods'), k: 'pod', t0: 0.05, t1: 0.4, end: 'drop', note: 'dst = in-port', label: 'pods-B → vm-web' }, { pts: join(up('A', 'web', 'eno2'), dn('sw1', 'B', 'eno1', 'adm')), k: 'uni', t0: 0.35, t1: 0.9, end: 'drop', note: 'looped back', label: 'vm-web → pods-B' }],
+        dec: [D('drop', 'Node B br-phy · from pods', 'dst vm-web → <b>local</b> = ingress port → not forwarded'), D('drop', 'Node B · eno1', 'unicast, src vm-web learned on <b>local</b> ≠ bond0 → <b>drop</b>')] },
+      { clock: 'T+mac-aging-time', title: 'Recovery only when Node B’s entry ages out', doc: 'SLB complication #3', dur: 4200,
+        body: '<p>Node B forgets vm-web after <code>mac-aging-time</code> (default 300 s) without traffic from the local port. To recover sooner, flush the stale entry on the node vm-web left (<code>ovs-appctl fdb/flush br-phy</code>) or have the guest send a gratuitous ARP once the lock has expired (<code>arping -U</code>).</p>',
+        vm: 'A',
+        frames: [{ pts: toB, k: 'pod', t0: 0.35, t1: 0.9, end: 'ok', label: 'pods-B → vm-web' }],
+        up: [{ at: 0.2, t: 'B', k: 'web', v: null }, { at: 0.95, t: 'B', k: 'web', v: { port: 'bond0', fresh: true } }] });
+    return steps;
+  }
+
 
   /* ---------------- Lifecycle scenario (cold start → migrate → N rebalances → migrate back) ---------------- */
   let nReb = 2; // user-selectable number of rebalances
@@ -160,37 +328,18 @@
     const clock = fmt(base);
     const rev = from === 'B';
     const mig = rev ? MIG.slice().reverse() : MIG;
-    const sw = swOf(member), hTo = to === 'A' ? 'hA' : 'hB', hFrom = from === 'A' ? 'hA' : 'hB';
-    const port = `${to}·${member}`;
+    const hFrom = from === 'A' ? 'hA' : 'hB';
     return [
       { clock: fmt(base - 3), title: `Live migration ${from} → ${to}: pre-copy`, doc: 'Setup', dur: 3600,
         body: `<p>KubeVirt copies vm-web's memory to Node ${to}. vm-web keeps running on Node ${from}, so every table is still correct. Pod traffic on both nodes is unaffected throughout — it never shares a bucket with vm-web.</p>`,
         vm: from, mig: true,
         frames: [0.05, 0.25, 0.45].map((t) => ({ pts: mig, k: 'mig', t0: t, t1: t + 0.45 })).concat(podTraffic(0.1)) },
-      { clock: `${clock}`, title: `Switchover: vm-web resumes on Node ${to}`, doc: 'SLB complication #4', dur: 3200,
+      { clock: `${clock}`, title: `Switchover: vm-web resumes on Node ${to}`, doc: 'SLB complication #3', dur: 3200,
         body: `<p>vm-web pauses on ${from} and resumes on ${to}. Every table is now wrong: the switches still point at Node ${from}, Node ${from} thinks vm-web is local, Node ${to} thinks it is out the bond.${firstTime ? '' : ' Node ' + from + ' also still holds the hash bucket vm-web last used there.'}</p>`,
         vm: ['move', 0.1, 0.7, rev ? 'rev' : 'fwd'], mig: true,
         frames: podTraffic(0.2),
         up: [{ at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: from, k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: to, k: 'web', v: { stale: true } }, { at: 0.7, t: hFrom, k: 'web', v: null }] },
-      { clock: fmt(base + 0.002), title: `GARP leaves Node ${to} on ${member} — learned locally and locked`, doc: 'SLB complication #5', dur: 4000,
-        body: `<p>The gratuitous ARP enters <code>br-phy</code> from the local port: Node ${to} learns <code>vm-web → local</code> and locks it for 5 s. The bond assigns vm-web's bucket to <code>${member}</code>${firstTime ? ' on first use' : ' (bucket state from the earlier stay is not reused — assignment is arbitrary again)'}; ${sw} learns <code>vm-web → ${port}</code>.</p>`,
-        vm: to,
-        frames: [{ pts: up(to, 'web', member), k: 'garp', t0: 0.05, t1: 0.75, end: null, label: 'GARP' }].concat(podTraffic(0.3)),
-        up: [{ at: 0.18, t: to, k: 'web', v: { port: 'local', lock: true, fresh: true } }, { at: 0.4, t: hTo, k: 'web', v: member }, { at: 0.74, t: 'sw', k: 'web', v: { port, fresh: true } }] },
-      { clock: fmt(base + 0.003), title: 'GARP floods to every member on both nodes', doc: 'SLB complications #2, #4, #5', dur: 5200,
-        body: `<p><b>Node ${from}</b> (the old host) accepts the GARP on its active member only. vm-web is still learned <i>local</i> there — normally "loop, drop" — but the GARP exception applies, so it relearns <code>vm-web → bond0</code>. <b>Node ${to}</b> drops its own reflection: the entry is GARP-locked.</p>${indep ? '<p>With no peer-link the flood transits core1, which records a MAC move, and the other switch relearns vm-web via its uplink.</p>' : ''}`,
-        vm: to,
-        frames: flood(sw, `${to}.${member}`, 'garp', {
-          [`${from}.eno1`]: { to: 'local', end: 'ok', note: 'GARP exception' },
-          [`${to}.eno1`]: { to: 'adm', end: 'drop', note: 'locked' },
-        }, 0.05, 0.75, { core: true }).concat(podTraffic(0.35)),
-        up: [{ at: 0.66, t: from, k: 'web', v: { port: 'bond0', fresh: true } }],
-        dec: [D('ok', `Node ${from} · eno1 (active)`, 'src vm-web learned on <b>local</b> ≠ bond0 · is GARP ✓ · not locked → <b>admit, relearn → bond0</b>'), D('drop', `Node ${to} · eno1 (active)`, 'is GARP ✓ · entry <b>GARP-locked</b> → <b>drop</b>')] },
-      { clock: fmt(base + 0.01), title: `Converged on Node ${to}`, doc: 'Result', dur: 4000,
-        body: `<p>The gateway reaches vm-web through ${sw} → ${port}. One GARP corrected the switches and both nodes in milliseconds; pod traffic never noticed.</p>`,
-        vm: to,
-        frames: [{ pts: join(fromCore(sw), dn(sw, to, member, 'web')), k: 'uni', t0: 0.05, t1: 0.6, end: 'ok', label: 'gw → vm-web' }, { pts: join(up(to, 'web', member), toCore(sw)), k: 'uni', t0: 0.45, t1: 0.95, end: 'ok', label: 'vm-web → gw' }].concat(podTraffic(0.1)),
-        up: [{ at: 0.1, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }, { at: 0.9, t: 'patch', tb: to, k: 'web', v: { lock: false } }] },
+      ...announceSteps(from, to, member, base, { pods: true, firstTime }),
     ];
   }
   function rebalanceSteps(host, start, n, clock0) {
@@ -228,14 +377,14 @@
       .concat(reb.steps)
       .concat(migrateSteps('B', 'A', 'eno2', nReb * 10 + 30, false));
     steps.push({ clock: `T+${nReb * 10 + 31} s`, title: 'Back on Node A — what the fabric saw', doc: 'Summary', dur: 4200,
-      body: `<p>Two migrations and ${nReb} rebalance${nReb === 1 ? '' : 's'}: vm-web's MAC changed switch port <b>${2 + nReb}</b> times${indep ? ', with a MAC move on core1 each time it changed switches' : ', each one a MAC move inside the MLAG pair'}. Only the two migrations sent an announcement; every rebalance relied on vm-web's own next frame.</p><p>Pod traffic (pods ↔ gw) stayed on eno1 the whole time: one MAC, one bucket, one member.</p>`,
+      body: `<p>Two migrations and ${nReb} rebalance${nReb === 1 ? '' : 's'}: vm-web's MAC changed switch port <b>${2 + nReb}</b> times${indep ? ', with a MAC move on core1 each time it changed switches' : ', each one a MAC move inside the MLAG pair'}. Only the two migrations sent announcements (what they were, and whether the old node accepted them, follows the Announcement controls); every rebalance relied on vm-web's own next frame.</p><p>Pod traffic (pods ↔ gw) stayed on eno1 the whole time: one MAC, one bucket, one member.</p>`,
       vm: 'A',
       frames: [{ pts: join(fromCore('sw1'), dn('sw1', 'A', 'eno2', 'web')), k: 'uni', t0: 0.05, t1: 0.6, end: 'ok', label: 'gw → vm-web' }].concat(podTraffic(0.1)) });
     return { id: 'life', n: '2', name: 'Lifecycle: migrate → rebalance ×N → migrate back', init: coldStart, steps };
   }
   function coldStartSteps() {
     return [
-        { clock: 'T−60 s', title: 'Cold start: nobody has learned vm-web yet', doc: 'Bond packet output · SLB complication #3', dur: 6000,
+        { clock: 'T−60 s', title: 'Cold start: nobody has learned vm-web yet', doc: 'Bond packet output · SLB complication #2', dur: 6000,
           body: `<p>vm-web boots on Node A and ARPs for its gateway. The broadcast enters <code>br-phy</code> from the local port, so <b>Node A learns vm-web → local</b>; the bond assigns its bucket to <code>eno2</code> on first use and sw1 learns <code>vm-web → A·eno2</code>.</p><p>The switches flood the ARP to every other member. Node A's own copies: eno1 (active) is dropped as a reflection — vm-web is learned locally — and eno3/eno4 as non-active. Node B accepts the copy on its active member and <b>learns vm-web → bond0</b>.</p>`,
           bodyI: `<p>vm-web boots on Node A and ARPs for its gateway. The broadcast enters <code>br-phy</code> from the local port, so <b>Node A learns vm-web → local</b>; the bond assigns its bucket to <code>eno2</code> and sw1 learns <code>vm-web → A·eno2</code>.</p><p>With no peer-link, sw1 floods to core1, which learns vm-web on its sw1 port and floods to sw2, which learns <code>vm-web → core1</code>. Node A drops its own reflections (eno1: looped back; eno3/eno4: non-active). Node B accepts the copy on its active member and <b>learns vm-web → bond0</b>.</p>`,
           vm: 'A',
@@ -303,48 +452,18 @@
           body: `<p>The VM pauses on A and resumes on B. At this instant <b>every</b> table that matters is wrong: the switches send vm-web's traffic to Node A, Node A thinks vm-web is local, and Node B thinks it is out the bond.</p><p>Only an announcement from vm-web's new location can fix all three.</p>`,
           vm: ['move', 0.1, 0.7], mig: true,
           up: [{ at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: 'A', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: 'B', k: 'web', v: { stale: true } }, { at: 0.7, t: 'hA', k: 'web', v: null }] },
-        { clock: 'T+0.002 s', title: 'Gratuitous ARP leaves Node B — learned locally and locked', doc: 'SLB complication #5', dur: 4000,
-          body: `<p>vm-web (or ovn-controller, if it knows the VM's IP) sends a <b>gratuitous ARP</b>. It enters <code>br-phy</code> from the local patch port, so Node B learns <code>vm-web → local</code> and <b>locks the entry for 5 s</b> against GARPs arriving on the bond.</p><p>The bond picks <code>eno3</code> for vm-web's bucket (first use → arbitrary). sw2 learns <code>vm-web → B·eno3</code>.</p>`,
-          vm: 'B',
-          frames: [{ pts: up('B', 'web', 'eno3'), k: 'garp', t0: 0.05, t1: 0.75, end: null, label: 'GARP' }],
-          up: [{ at: 0.18, t: 'B', k: 'web', v: { port: 'local', lock: true, fresh: true } }, { at: 0.4, t: 'hB', k: 'web', v: 'eno3' }, { at: 0.74, t: 'sw', k: 'web', v: { port: 'B·eno3', fresh: true } }],
-          dec: [D('ok', 'Node B br-phy · ingress local', 'GARP on a <b>non-bond</b> port → learn <code>vm-web → local</code>, set <b>GARP lock (5 s)</b>.'), D('ok', 'Node B bond0 · output', 'hash(vm-web) → <b>eno3</b> (not the active member).')] },
-        { clock: 'T+0.003 s', title: 'Switches flood the GARP to every member on both nodes', titleI: 'GARP floods via core1 to every member on both nodes', doc: 'SLB complications #2, #4, #5', dur: 5200,
-          bodyI: `<p>The GARP is broadcast: sw2 learns <code>vm-web → B·eno3</code> and floods it to its own host ports and up to core1. <b>core1 sees vm-web move</b> from its sw1 port to its sw2 port and floods on to sw1, which relearns <code>vm-web → core1</code>. Every cross-switch copy transits the core.</p><p><b>Node A</b> accepts only on its active member (eno1) and relearns <code>vm-web → bond0</code> via the GARP exception. <b>Node B</b> drops its own reflection on eno1 because the entry is locked.</p>`,
-          body: `<p>The GARP is broadcast, so the MLAG pair floods it to all 7 other host ports. Watch each node’s bond decide:</p><p><b>Node A</b> accepts it only on its active member (eno1). vm-web is learned <i>local</i> there, which would normally mean "loop, drop" — but a GARP is the exception, so A relearns <code>vm-web → bond0</code>.</p><p><b>Node B</b> receives its own GARP back on eno1. It is a GARP, but the entry is locked → dropped. Without the lock B would relearn vm-web on the bond.</p>`,
-          vm: 'B',
-          frames: flood('sw2', 'B.eno3', 'garp', {
-            'A.eno1': { to: 'local', end: 'ok', note: 'GARP exception' },
-            'B.eno1': { to: 'adm', end: 'drop', note: 'locked' },
-          }, 0.05, 0.75, { core: true }),
-          up: [{ at: 0.66, t: 'A', k: 'web', v: { port: 'bond0', fresh: true } }],
-          dec: [
-            D('ok', 'Node A · eno1 (active)', 'broadcast on active ✓ · src vm-web learned on <b>local</b> ≠ bond0 · is GARP ✓ · not locked → <b>admit, relearn → bond0</b>'),
-            D('drop', 'Node A · eno2/3/4, Node B · eno2/4', 'broadcast on non-active member → <b>drop</b> (complication #2)'),
-            D('drop', 'Node B · eno1 (active)', 'src learned on <b>local</b> · is GARP ✓ · entry <b>GARP-locked</b> → <b>drop</b> (complication #5)'),
-          ] },
-        { clock: 'T+0.010 s', title: 'Converged — both directions work', doc: 'Result', dur: 4400,
-          body: `<p>The gateway reaches vm-web through sw2 → B·eno3. vm-x on Node A now looks up vm-web → <code>bond0</code>, so its frames leave on its own bucket (eno4) and the switch delivers them to B·eno3.</p><p>One GARP fixed three tables in a few milliseconds. This is the only path the design is built for.</p>`,
-          vm: 'B',
-          frames: [
-            { pts: join(fromCore('sw2'), dn('sw2', 'B', 'eno3', 'web')), k: 'uni', t0: 0.05, t1: 0.65, end: 'ok', label: 'gw → vm-web' },
-            { pts: join(up('A', 'x', 'eno4'), dn('sw2', 'B', 'eno3', 'web')), k: 'uni', t0: 0.15, t1: 0.85, end: 'ok', label: 'vm-x → vm-web' },
-          ],
-          up: [{ at: 0.1, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }] },
-        { clock: 'T+5.0 s', title: 'GARP lock expires', doc: 'SLB complication #5', dur: 2800,
-          body: `<p>After 5 s the lock clears. From here vm-web's entry behaves normally and is refreshed by its own traffic. It ages out after <code>mac-aging-time</code> idle (upstream default 300 s).</p>`,
-          vm: 'B', up: [{ at: 0.3, t: 'patch', tb: 'B', k: 'web', v: { lock: false } }] },
+        ...announceSteps('A', 'B', 'eno3', 0, { lockStep: true, recovery: true }),
       ],
     },
 
     lifecycle(),
     {
-      id: 'ex1', n: '#1', bad: true, name: 'Unknown unicast → duplicates', init: () => { const s = converged(); applySw(s, 'web', null); return s; },
+      id: 'ex1', n: '#0', bad: true, name: 'Unknown unicast → duplicates', init: () => { const s = converged(); applySw(s, 'web', null); return s; },
       steps: [
-        { clock: 'T+0 s', title: 'The switches have forgotten vm-web', doc: 'SLB complication #1', dur: 3000,
+        { clock: 'T+0 s', title: 'The switches have forgotten vm-web', doc: 'SLB complication #0', dur: 3000,
           body: `<p>vm-web is quiet, so the MLAG pair's entry ages out — or the table is flushed by a topology change (peer-link flap, STP TCN, link bounce). The OVS nodes still know where vm-web is; the switches don't.</p>`,
           vm: 'B' },
-        { clock: 'T+0.001 s', title: 'Gateway sends unicast → switches flood it to all 8 members', doc: 'SLB complication #1', dur: 5200,
+        { clock: 'T+0.001 s', title: 'Gateway sends unicast → switches flood it to all 8 members', doc: 'SLB complication #0', dur: 5200,
           bodyI: `<p>core1 has no entry either, so it floods to both switches and each switch floods to all of its host ports — all four of Node B's members included. SLB accepts unicast on <b>any</b> member, so <b>vm-web receives four copies</b>. Node A discards its copies because its FDB says vm-web is out the bond — the port they arrived on.</p><p class="warnline">OVS documents this and does not solve it.</p>`,
           body: `<p>Unknown unicast is flooded to every port in the VLAN — all four of Node B's members included. SLB accepts unicast on <b>any</b> member, so <b>vm-web receives four copies</b> of the same frame.</p><p>Node A accepts its copies too, but its FDB says vm-web is out bond0 — the same port it arrived on — so it discards them.</p><p class="warnline">OVS documents this and does not solve it.</p>`,
           vm: 'B',
@@ -356,7 +475,7 @@
             D('drop', 'Node B · eno1–eno4', 'dst unicast → accepted on every member · src gw on bond0 = ingress → <b>admit ×4 → vm-web gets duplicates</b>'),
             D('ok', 'Node A · eno1–eno4', 'admitted, but dst vm-web → <b>bond0</b> = ingress bundle → not forwarded'),
           ] },
-        { clock: 'T+0.002 s', title: 'Flooding stops once vm-web speaks', doc: 'SLB complication #1', dur: 3600,
+        { clock: 'T+0.002 s', title: 'Flooding stops once vm-web speaks', doc: 'SLB complication #0', dur: 3600,
           body: `<p>As soon as vm-web transmits, sw2 learns <code>vm-web → B·eno3</code> and unicast is delivered once. Exposure is the window between the switch forgetting a MAC and that MAC sending again — worst for silent or receive-mostly VMs.</p>`,
           vm: 'B',
           frames: [{ pts: join(up('B', 'web', 'eno3'), toCore('sw2')), k: 'uni', t0: 0.05, t1: 0.7, end: 'ok', label: 'vm-web reply' }],
@@ -364,9 +483,9 @@
       ],
     },
     {
-      id: 'ex2', n: '#2', bad: true, name: 'Inbound broadcast', init: converged,
+      id: 'ex2', n: '#1', bad: true, name: 'Inbound broadcast', init: converged,
       steps: [
-        { clock: 'T+0 s', title: 'Gateway broadcasts an ARP request', doc: 'SLB complication #2', dur: 5000,
+        { clock: 'T+0 s', title: 'Gateway broadcasts an ARP request', doc: 'SLB complication #1', dur: 5000,
           body: `<p>A broadcast from outside the bond is flooded to all eight members — four copies per node. To avoid duplicating it four times, SLB accepts multicast/broadcast <b>only on the active member</b> and drops it on the rest.</p><p>Note the active member (eno1) is unrelated to vm-web's hash member (eno3). Broadcast in and unicast in take different links.</p>`,
           vm: 'B',
           frames: coreFlood('bcast', {
@@ -383,13 +502,13 @@
       ],
     },
     {
-      id: 'ex3', n: '#3', bad: true, name: 'Outbound broadcast reflection', init: converged,
+      id: 'ex3', n: '#2', bad: true, name: 'Outbound broadcast reflection', init: converged,
       steps: [
-        { clock: 'T+0 s', title: 'vm-web broadcasts on its hash member, eno3', doc: 'SLB complication #3', dur: 3600,
+        { clock: 'T+0 s', title: 'vm-web broadcasts on its hash member, eno3', doc: 'SLB complication #2', dur: 3600,
           body: `<p>vm-web sends an ARP request. Like every frame from vm-web, it leaves on its hash member <code>eno3</code> — which is <b>not</b> the active member.</p>`,
           vm: 'B',
           frames: [{ pts: up('B', 'web', 'eno3'), k: 'bcast', t0: 0.05, t1: 0.8, label: 'ARP who-has' }] },
-        { clock: 'T+0.001 s', title: 'The switches flood it straight back into Node B', doc: 'SLB complication #3', dur: 5400,
+        { clock: 'T+0.001 s', title: 'The switches flood it straight back into Node B', doc: 'SLB complication #2', dur: 5400,
           bodyI: `<p>sw2 floods the ARP to B·eno4 and up to core1; core1 floods to sw1, which delivers it to B·eno1 and B·eno2. With no peer-link, <b>every reflected broadcast crosses the core</b> before it comes back to the node. The copy on the active member (eno1) is dropped because vm-web is learned <code>local</code> — "looped back".</p>`,
           body: `<p>The flood returns on B's other three members — including the active member, which <i>does</i> accept broadcast. Without special handling vm-web would hear its own broadcast and Node B would relearn vm-web on bond0.</p><p>SLB drops any frame arriving on the bond whose <b>source MAC is learned on a different port</b>. vm-web is learned <code>local</code> → "looped back" → drop. This is why SLB depends critically on MAC learning (and why it is incompatible with <code>flood_vlans</code>).</p>`,
           vm: 'B',
@@ -403,19 +522,19 @@
       ],
     },
     {
-      id: 'ex4', n: '#4', bad: true, name: 'No GARP after migration', init: steady,
+      id: 'ex4', n: '#3', bad: true, name: 'No GARP after migration', init: steady,
       steps: [
-        { clock: 'T+0.000 s', title: 'Switchover — tables are stale', doc: 'SLB complication #4', dur: 3200,
+        { clock: 'T+0.000 s', title: 'Switchover — tables are stale', doc: 'SLB complication #3', dur: 3200,
           body: `<p>Same migration as the happy path. vm-web resumes on Node B and every table still points at Node A.</p>`,
           vm: ['move', 0.1, 0.7], mig: true,
           up: [{ at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: 'A', k: 'web', v: { stale: true } }, { at: 0.7, t: 'patch', tb: 'B', k: 'web', v: { stale: true } }, { at: 0.7, t: 'hA', k: 'web', v: null }] },
-        { clock: 'T+0.002 s', title: 'Only a RARP is sent (or the GARP is lost)', doc: 'SLB complication #4', dur: 4000,
-          body: `<p>QEMU's post-migration self-announce is a broadcast <b>RARP</b> (ethertype 0x8035), and ovn-controller also sends RARP when it doesn't know the port's IP. OVS's GARP exception only matches ARP, so a RARP gets <b>no special treatment and no lock</b>.</p><p>Node B learns <code>vm-web → local</code>. sw2 learns <code>vm-web → B·eno3</code> — RARP is enough for the physical switches.</p>`,
+        { clock: 'T+0.002 s', whatif: anyGarp() ? 'Hypothetical — with the chosen announcement settings a gratuitous ARP would be sent; here none arrives' : undefined, title: 'Only a RARP is sent (or the GARP is lost)', doc: 'SLB complication #3', dur: 4000,
+          body: `<p>QEMU's post-migration self-announce is a broadcast <b>RARP</b> (ethertype 0x8035), and ovn-controller sends RARPs too when vm-web's port has no IP in OVN (localnet NAD without subnets). This is the real outcome for a guest that cannot announce itself, or an IPv6-only guest, on such a NAD. OVS's GARP exception only matches ARP, so a RARP gets <b>no special treatment and no lock</b>.</p><p>Node B learns <code>vm-web → local</code>. sw2 learns <code>vm-web → B·eno3</code> — RARP is enough for the physical switches.</p>`,
           vm: 'B',
           frames: [{ pts: up('B', 'web', 'eno3'), k: 'rarp', t0: 0.05, t1: 0.75, label: 'RARP' }],
           up: [{ at: 0.18, t: 'B', k: 'web', v: { port: 'local', fresh: true } }, { at: 0.4, t: 'hB', k: 'web', v: 'eno3' }, { at: 0.74, t: 'sw', k: 'web', v: { port: 'B·eno3', fresh: true } }],
           dec: [D('warn', 'Node B br-phy · ingress local', '<code>is_gratuitous_arp()</code> requires ethertype ARP → RARP is <b>not</b> a GARP → learn local, <b>no lock</b>')] },
-        { clock: 'T+0.003 s', title: 'Node A discards the RARP as a reflection', doc: 'SLB complication #4', dur: 5000,
+        { clock: 'T+0.003 s', title: 'Node A discards the RARP as a reflection', doc: 'SLB complication #3', dur: 5000,
           body: `<p>The flood reaches Node A's active member. Node A still has vm-web learned on its <b>local</b> port, so a frame from vm-web arriving on the bond looks exactly like a reflection — and it is not a GARP, so there is no exception.</p><p><b>Node A's entry stays <code>local</code>.</b> Nothing else will correct it.</p>`,
           vm: 'B',
           frames: flood('sw2', 'B.eno3', 'rarp', {
@@ -423,11 +542,11 @@
           }, 0.05, 0.75, { core: true }),
           up: [{ at: 0.7, t: 'patch', tb: 'A', k: 'web', v: { stale: false, wrong: true } }, { at: 0.7, t: 'patch', tb: 'sw', k: 'web', v: { stale: false } }],
           dec: [D('drop', 'Node A · eno1 (active)', 'broadcast on active ✓ · src vm-web learned on <b>local</b> ≠ bond0 · not a GARP → <b>drop</b>. Dropped frames never reach MAC learning.')] },
-        { clock: 'T+0.010 s', title: 'North-south works — so it looks "mostly fine"', doc: 'SLB complication #4', dur: 3600,
+        { clock: 'T+0.010 s', title: 'North-south works — so it looks "mostly fine"', doc: 'SLB complication #3', dur: 3600,
           body: `<p>The gateway reaches vm-web via sw2 → B·eno3. Monitoring from outside the cluster may show no outage at all.</p>`,
           vm: 'B',
           frames: [{ pts: join(fromCore('sw2'), dn('sw2', 'B', 'eno3', 'web')), k: 'uni', t0: 0.05, t1: 0.75, end: 'ok', label: 'gw → vm-web' }] },
-        { clock: 'T+0.020 s', title: 'Node A black-holes vm-web in both directions', doc: 'SLB complication #4', dur: 5400,
+        { clock: 'T+0.020 s', title: 'Node A black-holes vm-web in both directions', doc: 'SLB complication #3', dur: 5400,
           body: `<p><b>vm-x → vm-web</b> and <b>pods → vm-web:</b> Node A's br-phy looks up vm-web → <code>local</code>, the port the frames came in on, and discards them. Probes, monitoring and any pod on Node A lose the VM.</p><p><b>vm-web → vm-x:</b> the reply arrives on A·eno4; source vm-web is "learned elsewhere" → dropped as a loop.</p><p>Anything on Node A — or any path that crosses Node A's br-phy — loses vm-web.</p>`,
           vm: 'B',
           frames: [
@@ -436,7 +555,7 @@
             { pts: join(up('B', 'web', 'eno3'), dn('sw2', 'A', 'eno4', 'adm')), k: 'uni', t0: 0.35, t1: 0.9, end: 'drop', note: 'looped back', label: 'vm-web → vm-x' },
           ],
           dec: [D('drop', 'Node A br-phy · from vm-x', 'dst vm-web → <b>local</b> = ingress port → not forwarded'), D('drop', 'Node A · eno4', 'unicast, src vm-web learned on <b>local</b> ≠ bond0 → <b>drop</b>')] },
-        { clock: 'T+mac-aging-time', title: 'Recovery only when Node A’s entry ages out', doc: 'SLB complication #4', dur: 4200,
+        { clock: 'T+mac-aging-time', title: 'Recovery only when Node A’s entry ages out', doc: 'SLB complication #3', dur: 4200,
           body: `<p>The OVS doc cites a delay of up to 60 s. In current OVS the window is the bridge's <code>mac-aging-time</code> (upstream default <b>300 s</b>, range 15–3600 s) counted from vm-web's last frame on Node A — the dropped frames never refresh or fix it.</p><p>Once the entry expires, vm-x's next frame floods out the bond, reaches vm-web, and the reply is learned correctly on bond0.</p>`,
           vm: 'B',
           frames: [{ pts: join(up('A', 'x', 'eno4'), dn('sw2', 'B', 'eno3', 'web')), k: 'uni', t0: 0.35, t1: 0.9, end: 'ok', label: 'vm-x → vm-web' }],
@@ -444,22 +563,22 @@
       ],
     },
     {
-      id: 'ex5', n: '#5', bad: true, name: 'Reflected GARP & 5 s lock', init: justMigrated,
+      id: 'ex5', n: '#4', bad: true, name: 'Reflected GARP & 5 s lock', init: justMigrated,
       steps: [
-        { clock: 'T+0.002 s', title: 'GARP from the local port arms the lock', doc: 'SLB complication #5', dur: 3800,
+        { clock: 'T+0.002 s', title: 'GARP from the local port arms the lock', doc: 'SLB complication #4', dur: 3800,
           body: `<p>vm-web has just landed on Node B, whose FDB still says <code>vm-web → bond0</code>. The GARP comes in from the local port, so B moves the entry to <code>local</code> and <b>locks it for 5 s</b>.</p><p>The hash puts vm-web on <code>eno3</code>, not on the active member eno1. That combination is what makes this complication possible.</p>`,
           vm: 'B',
           frames: [{ pts: up('B', 'web', 'eno3'), k: 'garp', t0: 0.05, t1: 0.75, label: 'GARP' }],
           up: [{ at: 0.18, t: 'B', k: 'web', v: { port: 'local', lock: true, fresh: true } }, { at: 0.4, t: 'hB', k: 'web', v: 'eno3' }, { at: 0.74, t: 'sw', k: 'web', v: { port: 'B·eno3', fresh: true } }] },
-        { clock: 'T+0.003 s', title: 'Reflection lands on B’s active member — the lock drops it', doc: 'SLB complication #5', dur: 5000,
-          body: `<p>The switches flood the GARP back to B·eno1. It passes the active-member check, its source is learned elsewhere (local), and it <i>is</i> a GARP — so the complication #4 exception would normally admit it and relearn vm-web on bond0.</p><p>The 5 s lock is what turns that into a drop.</p>`,
+        { clock: 'T+0.003 s', title: 'Reflection lands on B’s active member — the lock drops it', doc: 'SLB complication #4', dur: 5000,
+          body: `<p>The switches flood the GARP back to B·eno1. It passes the active-member check, its source is learned elsewhere (local), and it <i>is</i> a GARP — so the complication #3 exception would normally admit it and relearn vm-web on bond0.</p><p>The 5 s lock is what turns that into a drop.</p>`,
           vm: 'B',
           frames: flood('sw2', 'B.eno3', 'garp', {
             'A.eno1': { to: 'local', end: 'ok' }, 'B.eno1': { to: 'adm', end: 'drop', note: 'locked' },
           }, 0.05, 0.75, { core: true }),
           up: [{ at: 0.66, t: 'A', k: 'web', v: { port: 'bond0', fresh: true } }],
           dec: [D('drop', 'Node B · eno1 (active)', 'broadcast on active ✓ · src learned on local · is GARP ✓ · <code>mac_entry_is_grat_arp_locked()</code> ✓ → <b>drop</b>')] },
-        { clock: 'T+0.003 s', whatif: 'Hypothetical — what would happen without the 5 s GARP lock', title: 'Without the lock: Node B black-holes its own VM', doc: 'SLB complication #5', dur: 5000,
+        { clock: 'T+0.003 s', whatif: 'Hypothetical — what would happen without the 5 s GARP lock', title: 'Without the lock: Node B black-holes its own VM', doc: 'SLB complication #4', dur: 5000,
           body: `<p>If the reflected GARP were admitted, Node B would learn <code>vm-web → bond0</code>. Every frame for vm-web — including the gateway's — would then arrive on the bond and be discarded because its destination is "out the port it came in on".</p><p>The VM would be unreachable on the node it is running on.</p>`,
           vm: 'B',
           frames: [
@@ -467,13 +586,13 @@
             { pts: join(fromCore('sw2'), dn('sw2', 'B', 'eno3', 'br')), k: 'uni', t0: 0.4, t1: 0.9, end: 'drop', note: 'dst = in-port', label: 'gw → vm-web', dash: true },
           ],
           up: [{ at: 0.3, t: 'B', k: 'web', v: { port: 'bond0', wrong: true, fresh: true } }] },
-        { clock: 'T+0.004 s', title: 'Reality: entry stays local, traffic flows', doc: 'SLB complication #5', dur: 3600,
+        { clock: 'T+0.004 s', title: 'Reality: entry stays local, traffic flows', doc: 'SLB complication #4', dur: 3600,
           body: `<p>With the lock, B keeps <code>vm-web → local</code> and the gateway's traffic is delivered. If vm-web's bucket had been on the active member, the switch would never have returned the GARP on that port and the other members would have dropped it as non-active — the lock only matters when hash member ≠ active member.</p>`,
           vm: 'B',
           frames: [{ pts: join(fromCore('sw2'), dn('sw2', 'B', 'eno3', 'web')), k: 'uni', t0: 0.15, t1: 0.8, end: 'ok', label: 'gw → vm-web' }],
           up: [{ at: 0.05, t: 'B', k: 'web', v: { port: 'local', lock: true } }] },
-        { clock: 'T+5.0 s', title: 'Lock expires — a residual window remains', doc: 'SLB complication #5', dur: 3400,
-          body: `<p>After 5 s the lock is gone. Every new GARP from vm-web re-arms it because it enters from the local port first. The residual edge case: a GARP for vm-web's MAC arriving on B's active member <i>from the network</i> more than 5 s after the last local one would be accepted and move the entry to bond0.</p>`,
+        { clock: 'T+5.0 s', title: 'Lock expires — the window it leaves', doc: 'SLB complication #4', dur: 3400,
+          body: `<p>The lock runs 5 s after the <b>last</b> gratuitous ARP from the local port, and announcements repeat: the guest answers each of QEMU's 5 rounds (≈1.25 s), and ovn-controller, when it knows the IP, repeats for ≈16 s. So the window is about 6 s, or about 21 s, after switchover.</p><p>The cost of the lock: while it runs, Node B also drops a <b>genuine</b> gratuitous ARP for vm-web from another node. If vm-web moves away inside the window, Node B keeps it as local and black-holes it — see <i>second move inside the lock</i>.</p>`,
           vm: 'B', up: [{ at: 0.3, t: 'patch', tb: 'B', k: 'web', v: { lock: false } }] },
       ],
     },
@@ -486,8 +605,8 @@
           bodyI: `<p>After <code>bond-downdelay</code>, OVS disables eno3 and immediately reassigns its buckets — vm-web moves to <code>eno4</code>. sw2 flushes the MACs it learned on the dead port, so it no longer knows vm-web; core1 and sw1 still point toward sw2, which is still correct once eno4 takes over.</p><p>Set <code>bond-updelay</code> longer than the switch's STP forwarding delay, or a recovering link gets load before the switch forwards on it.</p>`,
           up: [{ at: 0.2, t: 'down', k: 'B.eno3', v: true }, { at: 0.5, t: 'hB', k: 'web', v: 'eno4' }, indep ? { at: 0.5, t: 'swx', k: 'web', v: { sw2: null } } : { at: 0.5, t: 'sw', k: 'web', v: null }] },
         { clock: 'T+0.001 s', title: 'OVS sends RARP learning packets for local MACs', doc: 'Enabling and disabling members', dur: 5000,
-          bodyI: `<p>For every MAC learned on a non-bond port, OVS sends a <b>RARP</b> out the newly chosen member. sw2 learns <code>vm-web → B·eno4</code>; the broadcast crosses core1 to sw1, which refreshes <code>vm-web → core1</code>.</p><p>Because these are RARPs, not GARPs, they would <b>not</b> correct a stale "local" entry on another node — the same limitation as complication #4.</p>`,
-          body: `<p>For every MAC learned on a non-bond port, OVS sends a <b>RARP</b> out the newly chosen member. sw2 learns <code>vm-web → B·eno4</code>.</p><p>Other SLB nodes that already learned vm-web on their bond accept it normally. Because these are RARPs, not GARPs, they would <b>not</b> correct a stale "local" entry on another node — the same limitation as complication #4.</p>`,
+          bodyI: `<p>For every MAC learned on a non-bond port, OVS sends a <b>RARP</b> out the newly chosen member. sw2 learns <code>vm-web → B·eno4</code>; the broadcast crosses core1 to sw1, which refreshes <code>vm-web → core1</code>.</p><p>Because these are RARPs, not GARPs, they would <b>not</b> correct a stale "local" entry on another node — the same limitation as complication #3.</p>`,
+          body: `<p>For every MAC learned on a non-bond port, OVS sends a <b>RARP</b> out the newly chosen member. sw2 learns <code>vm-web → B·eno4</code>.</p><p>Other SLB nodes that already learned vm-web on their bond accept it normally. Because these are RARPs, not GARPs, they would <b>not</b> correct a stale "local" entry on another node — the same limitation as complication #3.</p>`,
           vm: 'B',
           frames: [{ pts: [[HOST.B.cx, BR_C], [HOST.B.px.eno4, ADM_Y], [HOST.B.px.eno4, PORT_Y], [HOST.B.att.eno4, ATT_Y], SW.sw2], k: 'rarp', t0: 0.03, t1: 0.35, label: 'learning RARP' }]
             .concat(flood('sw2', 'B.eno4', 'rarp', { 'B.eno3': { skip: true }, 'A.eno1': { to: 'local', end: 'ok' }, 'B.eno1': { to: 'adm', end: 'drop', note: 'looped back' } }, 0.35, 0.85, { core: true })),
@@ -498,12 +617,13 @@
           frames: [{ pts: join(fromCore('sw2'), dn('sw2', 'B', 'eno4', 'web')), k: 'uni', t0: 0.05, t1: 0.75, end: 'ok', label: 'gw → vm-web' }] },
       ],
     },
+    { id: 'relock', n: '+', bad: true, name: 'Related: second move inside the lock', init: justMigrated, steps: relockSteps() },
   ]; }
   let SCEN = buildScenarios();
 
   const RISKS = [
-    { sev: 'sev', tag: 'High', title: 'A migration without a real GARP strands the VM from its old node', scen: 'ex4',
-      html: `vm-web stays reachable from outside, but is cut off from workloads on (or traffic crossing) the source node until that node's br-phy entry ages out — the OVS doc cites up to 60 s; upstream <code>mac-aging-time</code> defaults to 300 s. QEMU's announce and OVN (without a known IP) send RARP, which the exception ignores. <b>Mitigate:</b> capture on the source node during a migration to prove which frames arrive; prefer guest-announce-capable virtio drivers; validate any aging/announce tuning with Red Hat before changing operator-managed bridges.` },
+    { sev: 'sev', tag: 'High', title: 'A migration without a gratuitous ARP strands the VM from its old node', scen: 'ex4',
+      html: `What fixes the old node is a gratuitous ARP, and only some setups send one. QEMU always sends a RARP, which the exception ignores. A virtio IPv4 guest adds a gratuitous ARP; an IPv6-only guest sends a neighbour advertisement, ignored too. ovn-controller adds gratuitous ARPs ≈1–16 s after switchover only when the VM's port has an IPv4 address in OVN (localnet NAD with subnets), RARPs otherwise. With no gratuitous ARP, vm-web stays reachable from outside but is cut off from workloads on (or traffic crossing) the source node until that node's br-phy entry ages out — the OVS doc cites up to 60 s; upstream <code>mac-aging-time</code> defaults to 300 s. Use the <b>Announcement</b> controls to compare. <b>Mitigate:</b> capture on the source node during a migration to prove which frames arrive; prefer guest-announce-capable virtio drivers; validate any aging/announce tuning with Red Hat before changing operator-managed bridges.` },
     { sev: 'sev', tag: 'High', title: 'Members on two different switches', scen: 'baseline',
       html: `Upstream OVS states active-backup is the only bond mode that supports members on different upstream switches. With the MLAG peer-link, the pair behaves as one L2 switch (shared chassis ID, synced MAC table, standalone trunk ports). Switch the toolbar to <b>Independent</b> to see the alternative: every rebalance or migration becomes a MAC move on core1, the "other" switch keeps stale entries until aging, and all reflected broadcasts transit the core. <b>Mitigate:</b> get Red Hat to confirm supportability of the exact topology, and test peer-link failure.` },
     { sev: '', tag: 'Medium', title: 'Unknown-unicast flooding delivers ×4 duplicates', scen: 'ex1',
@@ -514,8 +634,10 @@
       html: `Every 10 s a bucket may move between a sw1 port and a sw2 port. Switch MAC-move / loop-protection features can log, throttle or block the MAC. <b>Mitigate:</b> tune flap thresholds for host ports; <code>bond-rebalance-interval=0</code> stops rebalancing but keeps failover.` },
     { sev: '', tag: 'Medium', title: 'Loop suppression depends on MAC learning', scen: 'ex3',
       html: `Reflected broadcasts are dropped only because the source MAC is learned locally. Anything that disables or bypasses learning (e.g. <code>flood_vlans</code>) or churns the table (default <code>mac-table-size</code> 8192) weakens that protection.` },
-    { sev: 'ok', tag: 'Low', title: '5-second GARP lock window', scen: 'ex5',
-      html: `The lock stops a node relearning its own VM on the bond. It is re-armed by every local GARP; residual exposure is a network-sourced GARP for the same MAC arriving on the active member after 5 s.` },
+    { sev: '', tag: 'Medium', title: 'The GARP lock also hides a genuine move', scen: 'relock',
+      html: `The lock stops a node relearning its own VM from the reflection, but OVS cannot tell a reflection from a real announcement. Every local gratuitous ARP renews it, so it lasts ≈6 s after switchover with guest announcements and ≈21 s when ovn-controller repeats its own. If the VM moves away inside that window, the node it left keeps it as local: its workloads cannot reach the VM until OVN announces again after the lock, or <code>mac-aging-time</code> expires. <b>Mitigate:</b> space out repeated migrations of the same VM; to recover, flush the stale entry on the node it left (<code>ovs-appctl fdb/flush br-phy</code>).` },
+    { sev: '', tag: 'Medium', title: 'A recovering member forwards before the switch does', scen: 'fail',
+      html: `Red Hat's documented br-phy NMState sets no <code>bond-updelay</code>, so OVS enables a member as soon as carrier returns. A non-edge switch port spends 2 × forward delay (30 s with default STP timers, up to 50 s when max-age expires first) in listening and learning: frames hashed or rebalanced onto that member, and its learning RARPs, are discarded meanwhile — a 30–50 s outage for the MACs on that link, or for all inbound broadcast if it is the active member. <b>Mitigate:</b> make host-facing switch ports edge (portfast) ports with BPDU guard, or set <code>bond-updelay</code> above the switch's forwarding delay.` },
     { sev: 'ok', tag: 'Expectation', title: 'Only VM MACs are balanced', scen: 'baseline',
       html: `The <b>pods</b> square on each node is every Kubernetes pod flow leaving via <code>br-ex</code> with the node MAC: one MAC + VLAN → one bucket → one member. SLB adds bandwidth only across many VM MACs on localnet networks.` },
   ];
@@ -857,6 +979,7 @@
     S = SCEN.find((x) => x.id === id) || SCEN[0];
     document.querySelectorAll('#scenarios button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === S.id)));
     $('#lifeOpt').hidden = S.id !== 'life';
+    $('#annOpt').hidden = $('#ovnOpt').hidden = !['happy', 'life', 'ex4', 'relock'].includes(S.id);
     $('#track').innerHTML = S.steps.map((st, k) => `<span class="${S.bad ? 'bad' : ''}" title="${k + 1}. ${st.title.replace(/"/g, '&quot;')}" data-k="${k}"><i></i></span>`).join('');
     T = 0; lastStepIdx = -1; lastTblKey = ''; holdAt = null;
     render();
@@ -896,6 +1019,8 @@
     requestAnimationFrame(tick);
   }
   $('#nreb').addEventListener('change', (e) => { nReb = +e.target.value; rebuildScenarios(); load('life', true); });
+  $('#ann').addEventListener('change', (e) => { ann = e.target.value; rebuildScenarios(); load(S.id, false); });
+  $('#ovnIp').addEventListener('change', (e) => { ovnIp = e.target.checked; rebuildScenarios(); load(S.id, false); });
   $('#loop').addEventListener('change', (e) => { if (!e.target.checked) cancelLoop(); else if (!playing && T >= S.total - 2) scheduleLoop(); });
   $('#modeSeg').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
@@ -926,6 +1051,8 @@
   $('#risks').innerHTML = RISKS.map((r) => `<div class="risk"><h4><span class="pill ${r.sev}">${r.tag}</span>${r.title}</h4><div>${r.html}</div><button class="jump" data-id="${r.scen}">Show in visualization →</button></div>`).join('');
   $('#risks').addEventListener('click', (e) => { const b = e.target.closest('.jump'); if (!b) return; load(b.dataset.id, true); window.scrollTo({ top: 0, behavior: 'smooth' }); });
 
+  // browsers may restore form values on reload/back; keep the controls in step with the model
+  $('#ann').value = ann; $('#ovnIp').checked = ovnIp;
   buildNav();
   const hash = location.hash.replace('#', '');
   load(SCEN.some((s) => s.id === hash) ? hash : 'happy', false);
