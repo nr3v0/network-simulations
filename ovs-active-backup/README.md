@@ -17,6 +17,7 @@ The active-backup counterpart of [SLB Scope](../ovs-balance-slb/) and [LACP Scop
 
 - **Switches**: MLAG peer-link (shared MAC table) or Independent via core1.
 - **Failovers** (Lifecycle only), prev/play/next/restart, timeline, scrubber, speed, pause-after-step, loop. Keyboard: space, ←/→.
+- **Announcement** (happy path, lifecycle): RARP + gratuitous ARP, RARP + IPv6 neighbour advertisement, or RARP only, plus **OVN knows the IP (NAD subnets)**. Same model as SLB Scope; in active-backup the outcome is the same for every choice.
 
 ## Sources
 

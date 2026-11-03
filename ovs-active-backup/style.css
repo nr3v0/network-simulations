@@ -34,6 +34,7 @@
   --color-bcast: oklch(0.82 0.15 85);           /* ARP broadcast gold */
   --color-garp: oklch(0.80 0.17 145);           /* gratuitous ARP green */
   --color-rarp: oklch(0.74 0.15 305);           /* RARP violet */
+  --color-nd: oklch(0.78 0.13 350);             /* IPv6 neighbour advertisement pink */
   --color-mig: oklch(0.72 0.12 250);            /* migration blue */
   --color-pod: oklch(0.80 0.12 60);             /* pod network amber */
   --color-error: oklch(0.70 0.19 25);           /* drop red */
@@ -114,7 +115,7 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 .legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); padding: var(--space-2) var(--space-2) var(--space-1); font-size: var(--text-xs); color: var(--color-text-muted); }
 .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
 .legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.k-uni { background: var(--color-primary); } .k-bcast { background: var(--color-bcast); } .k-garp { background: var(--color-garp); } .k-rarp { background: var(--color-rarp); } .k-mig { background: var(--color-mig); }
+.k-uni { background: var(--color-primary); } .k-bcast { background: var(--color-bcast); } .k-garp { background: var(--color-garp); } .k-rarp { background: var(--color-rarp); } .k-nd { background: var(--color-nd); } .k-mig { background: var(--color-mig); }
 .legend .mk { font-style: normal; font-family: var(--font-mono); font-weight: 600; font-size: 0.75rem; }
 .mk.ok { color: var(--color-garp); } .mk.drop { color: var(--color-error); }
 .legend .act { width: 14px; height: 8px; border-radius: 2px; border: 2px solid var(--color-bcast); display: inline-block; }
@@ -137,7 +138,7 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 #topo .vm { fill: oklch(0.3 0.06 250); stroke: var(--color-mig); stroke-width: 1.5; }
 #topo .vm.ghost { fill: none; stroke: var(--color-text-faint); stroke-dasharray: 4 3; }
 #topo .frame { stroke: oklch(0.1 0 0 / 0.5); stroke-width: 1; }
-#topo .frame.uni { fill: var(--color-primary); } #topo .frame.bcast { fill: var(--color-bcast); } #topo .frame.garp { fill: var(--color-garp); } #topo .frame.rarp { fill: var(--color-rarp); } #topo .frame.mig { fill: var(--color-mig); }
+#topo .frame.uni { fill: var(--color-primary); } #topo .frame.bcast { fill: var(--color-bcast); } #topo .frame.garp { fill: var(--color-garp); } #topo .frame.rarp { fill: var(--color-rarp); } #topo .frame.nd { fill: var(--color-nd); } #topo .frame.mig { fill: var(--color-mig); }
 #topo .mark { font-family: var(--font-mono); font-weight: 600; font-size: 15px; }
 #topo .mark.ok { fill: var(--color-garp); } #topo .mark.drop { fill: var(--color-error); }
 #topo .markbg { fill: var(--color-surface); stroke-width: 1; }
@@ -209,6 +210,16 @@ main { max-width: 1480px; margin: 0 auto; padding: var(--space-5) var(--space-6)
 .opts select, .toolbar select { font: inherit; color: var(--color-text); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 0.35rem 0.5rem; min-height: 36px; }
 .opts .sel, .toolbar .sel { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--color-text-muted); }
 .toolbar .sel { margin-left: var(--space-2); }
+/* the announcement controls make the toolbar wider than its grid track: let it wrap and the select shrink */
+.toolbar { flex-wrap: wrap; row-gap: var(--space-2); }
+.toolbar .sel { min-width: 0; max-width: 100%; }
+.toolbar select { min-width: 0; max-width: 100%; }
+.toolbar .chk { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--color-text-muted); margin-left: var(--space-2); }
+@media (max-width: 720px) {
+  .transport { grid-template-columns: minmax(0, 1fr); }
+  .toolbar #annOpt { flex: 1 1 100%; }
+  .toolbar #annOpt select { flex: 1 1 auto; width: 0; }
+}
 .chk { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 .chk input { accent-color: var(--color-primary); width: 16px; height: 16px; }
 

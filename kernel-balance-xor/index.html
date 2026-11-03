@@ -110,6 +110,7 @@
           <li>On a link failure the hash is taken modulo the remaining slave count, so most flows remap; the simulation shows the modulo-3 result and restores the link before the next failover.</li>
           <li>Switch-side inbound member choice is the switch's own policy and need not match the bond's.</li>
           <li>The <b>pods</b> square stands for all Kubernetes pod-network traffic on the node (node MAC via <span class="mono">br-ex</span>).</li>
+          <li>Announcement type does not change the outcome here: QEMU's RARP, a guest gratuitous ARP or IPv6 neighbour advertisement, and ovn-controller's announcements are all accepted, because only <span class="mono">balance-slb</span> drops frames whose source is learned locally ("looped back") and needs the gratuitous-ARP exception. With the static port-channel configured, the switch never reflects a frame back into the LAG it came from (the plain-ports misconfiguration scenario is the exception). SLB Scope lets you choose the announcement.</li>
           <li>Timeline is compressed: animation time is not wall-clock. The clock shows real elapsed time.</li>
         </ul>
         <h3>Sources</h3>
