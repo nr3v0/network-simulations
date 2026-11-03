@@ -37,7 +37,7 @@
   function dn(from, h, eno, to) {
     const H = HOST[h], px = H.px[eno], s = swOf(eno);
     const pts = [SW[from]];
-    if (from !== s) { if (indep) pts.push(CORE); pts.push(SW[s]); }
+    if (from !== s) { if (indep) pts.push(...UPL[from], CORE, ...UPL[s].slice().reverse()); pts.push(SW[s]); }
     pts.push([H.att[eno], ATT_Y]);
     if (to === 'att') return pts;
     pts.push([px, PORT_Y], [px, ADM_Y]);
@@ -49,8 +49,11 @@
     pts.push(H.vm[to]);
     return pts;
   }
-  const fromCore = (s) => [CORE, SW[s]];
-  const toCore = (s) => [SW[s], CORE];
+  // Uplinks follow the drawn geometry: switch top centre → lower corner of the core box → core anchor.
+  const UPL = { sw1: [[SW.sw1[0], 157], [400, 86]], sw2: [[SW.sw2[0], 157], [600, 86]] };
+  const fromCore = (s) => [CORE].concat(UPL[s].slice().reverse(), [SW[s]]);
+  const toCore = (s) => [SW[s]].concat(UPL[s], [CORE]);
+  const viaCore = (pts) => fromCore(pts[0][0] === SW.sw1[0] ? 'sw1' : 'sw2').concat(pts.slice(1));
   const localUp = (h, vm) => { const H = HOST[h]; return [H.vm[vm], [H.cx, LOC_Y], [H.cx, BR_C], [H.cx, BR_TOP]]; };
 
   // Flood from a switch to every host-facing member except `src` ("A.eno3").
@@ -80,7 +83,7 @@
       const id = `${h}.${e}`;
       const sp = spec[id] || { to: 'adm', end: 'drop' };
       if (sp.skip) continue;
-      out.push({ pts: [CORE].concat(dn(swOf(e), h, e, sp.to)), k: kind, t0, t1, end: sp.end, note: sp.note, dash: opts.dash, label: first ? opts.label : undefined });
+      out.push({ pts: viaCore(dn(swOf(e), h, e, sp.to)), k: kind, t0, t1, end: sp.end, note: sp.note, dash: opts.dash, label: first ? opts.label : undefined });
       first = false;
     }
     return out;
@@ -626,8 +629,8 @@
         if (fr.dash) dyn.append(el('circle', { cx: p[0], cy: p[1], r: 10, fill: 'none', stroke: 'var(--color-warning)', 'stroke-dasharray': '3 2' }));
         dyn.append(el('circle', { cx: p[0], cy: p[1], r: 7, class: `frame ${fr.k}` }));
         if (fr.label && f < 0.82) {
-          const left = p[0] > 820;
-          const tx = el('text', { x: p[0] + (left ? -12 : 12), y: p[1] - 10, 'text-anchor': left ? 'end' : 'start', class: 'mono', style: `fill: var(--color-${fr.k === 'uni' ? 'primary' : fr.k}); font-weight:600` }, fr.label);
+          const left = p[0] > 820, below = p[1] < 100;
+          const tx = el('text', { x: p[0] + (left ? -12 : 12), y: below ? p[1] + 24 : p[1] - 10, 'text-anchor': left ? 'end' : 'start', class: 'mono', style: `fill: var(--color-${fr.k === 'uni' ? 'primary' : fr.k}); font-weight:600` }, fr.label);
           dyn.append(tx);
         }
       } else if (fr.end) {

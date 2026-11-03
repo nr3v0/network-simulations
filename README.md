@@ -22,3 +22,7 @@ Interactive, browser-based simulations of network behaviour. Each simulation is 
 python3 -m http.server 8765
 # open http://127.0.0.1:8765/  (landing page linking all simulations)
 ```
+
+## For AI agents
+
+See [`CLAUDE.md`](CLAUDE.md) for the project guide (layout, shared engine, QA checklist, conventions, verified sources). The full transcript of the Perplexity Computer session that built this repository is in [`docs/perplexity-computer-transcript.md`](docs/perplexity-computer-transcript.md).

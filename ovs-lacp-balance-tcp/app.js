@@ -41,7 +41,7 @@
   function dn(from, h, eno, to) {
     const H = HOST[h], px = H.px[eno], s = swOf(eno);
     const pts = [SW[from]];
-    if (from !== s) { if (indep) pts.push(CORE); pts.push(SW[s]); }
+    if (from !== s) { if (indep) pts.push(...UPL[from], CORE, ...UPL[s].slice().reverse()); pts.push(SW[s]); }
     pts.push([H.att[eno], ATT_Y]);
     if (to === 'att') return pts;
     pts.push([px, PORT_Y], [px, ADM_Y]);
@@ -53,11 +53,14 @@
     pts.push(H.vm[to]);
     return pts;
   }
-  const fromCore = (s) => [CORE, SW[s]];
-  const toCore = (s) => [SW[s], CORE];
+  // Uplinks follow the drawn geometry: switch top centre → lower corner of the core box → core anchor.
+  const UPL = { sw1: [[SW.sw1[0], 157], [400, 86]], sw2: [[SW.sw2[0], 157], [600, 86]] };
+  const fromCore = (s) => [CORE].concat(UPL[s].slice().reverse(), [SW[s]]);
+  const toCore = (s) => [SW[s]].concat(UPL[s], [CORE]);
+  const viaCore = (pts) => fromCore(pts[0][0] === SW.sw1[0] ? 'sw1' : 'sw2').concat(pts.slice(1));
   const localUp = (h, vm) => { const H = HOST[h]; return [H.vm[vm], [H.cx, LOC_Y], [H.cx, BR_C], [H.cx, BR_TOP]]; };
   // Unicast from core1 to host h: core1 picks a switch (its own port-channel hash), the switch picks a member of Po-h (its LAG hash).
-  const uniDown = (h, eno, to) => { const e = M(eno); return [CORE].concat(dn(swOf(e), h, e, to)); };
+  const uniDown = (h, eno, to) => { const e = M(eno); return viaCore(dn(swOf(e), h, e, to)); };
   // Frame from the bond up to core1 on member eno.
   const uniUp = (h, vm, eno) => { const e = M(eno); return join(up(h, vm, e), toCore(swOf(e))); };
 
@@ -71,7 +74,7 @@
     ];
     if (indep) { // core1 also floods to sw2, whose host ports are not in any bundle
       const tm = t0 + (t1 - t0) * 0.5;
-      out.push({ pts: [CORE, SW.sw2, [HOST[h2].att.eno3, ATT_Y]], k: kind, t0: tm, t1, end: 'drop', note: 'not attached', dash: o.dash });
+      out.push({ pts: viaCore([SW.sw2, [HOST[h2].att.eno3, ATT_Y]]), k: kind, t0: tm, t1, end: 'drop', note: 'not attached', dash: o.dash });
     }
     return out;
   }
@@ -84,8 +87,8 @@
       out.push({ pts: fromCore('sw1'), k: kind, t0, t1: tm, label: o.label, dash: o.dash });
       list.forEach(([h, e]) => out.push({ pts: dn('sw1', h, e, o.to || 'local'), k: kind, t0: tm, t1, end: (o.end && o.end[h]) || 'ok', note: o.note && o.note[h], dash: o.dash }));
     } else {
-      list.forEach(([h, e], i) => out.push({ pts: [CORE].concat(dn('sw1', h, e, o.to || 'local')), k: kind, t0, t1, end: (o.end && o.end[h]) || 'ok', note: o.note && o.note[h], dash: o.dash, label: i === 0 ? o.label : undefined }));
-      out.push({ pts: [CORE, SW.sw2, [HOST.B.att.eno4, ATT_Y]], k: kind, t0, t1, end: 'drop', note: 'not attached', dash: o.dash });
+      list.forEach(([h, e], i) => out.push({ pts: viaCore(dn('sw1', h, e, o.to || 'local')), k: kind, t0, t1, end: (o.end && o.end[h]) || 'ok', note: o.note && o.note[h], dash: o.dash, label: i === 0 ? o.label : undefined }));
+      out.push({ pts: viaCore([SW.sw2, [HOST.B.att.eno4, ATT_Y]]), k: kind, t0, t1, end: 'drop', note: 'not attached', dash: o.dash });
     }
     return out;
   }
@@ -323,11 +326,11 @@
         { clock: 'T+1 s', title: 'And the switch side blocks too', doc: 'OVS docs · LACP bonding', dur: 4000,
           body: `<p>Once the switch ports <i>are</i> configured for LACP but the bundle has not formed, most switches keep them blocked as well. Inbound frames die at the port. The node is unreachable from both directions until the handshake completes — including the Kubernetes node itself, not just VMs.</p>`,
           vm: 'A',
-          frames: [{ pts: [CORE, SW.sw1, [HOST.A.att.eno1, ATT_Y]], k: 'uni', t0: 0.05, t1: 0.5, end: 'drop', note: 'port blocked', label: 'gw → node A' }, { pts: [CORE, SW.sw2, [HOST.B.att.eno4, ATT_Y]], k: 'uni', t0: 0.25, t1: 0.7, end: 'drop', note: 'port blocked' }] },
+          frames: [{ pts: viaCore([SW.sw1, [HOST.A.att.eno1, ATT_Y]]), k: 'uni', t0: 0.05, t1: 0.5, end: 'drop', note: 'port blocked', label: 'gw → node A' }, { pts: viaCore([SW.sw2, [HOST.B.att.eno4, ATT_Y]]), k: 'uni', t0: 0.25, t1: 0.7, end: 'drop', note: 'port blocked' }] },
         { clock: 'T+1 s', whatif: 'Hypothetical — other_config:lacp-fallback-ab=true', title: 'With lacp-fallback-ab: active-backup on one link', doc: 'vswitch.conf.db · lacp-fallback-ab', dur: 4600,
           body: `<p>With <code>lacp-fallback-ab=true</code>, defaulted members are still attached and the bond behaves as <b>active-backup</b>: all traffic on one member (<code>eno1</code>), the rest idle. This only helps while the switch port forwards as an individual port — if the switch blocks un-negotiated LACP ports, fallback changes nothing.</p><p>"In both the cases, once the partner switch is configured to LACP mode, the bond will use LACP."</p>`,
           vm: 'A',
-          frames: [{ pts: uniUp('A', 'web', 'eno1'), k: 'uni', t0: 0.05, t1: 0.5, end: 'ok', label: 'vm-web → gw' }, { pts: [CORE].concat(dn('sw1', 'A', 'eno1', 'web')), k: 'uni', t0: 0.45, t1: 0.9, end: 'ok', label: 'gw → vm-web' }],
+          frames: [{ pts: uniUp('A', 'web', 'eno1'), k: 'uni', t0: 0.05, t1: 0.5, end: 'ok', label: 'vm-web → gw' }, { pts: viaCore(dn('sw1', 'A', 'eno1', 'web')), k: 'uni', t0: 0.45, t1: 0.9, end: 'ok', label: 'gw → vm-web' }],
           up: [{ at: 0.02, t: 'lk', k: 'A', v: { eno1: 'ab', eno2: 'def', eno3: 'def', eno4: 'def' } }, { at: 0.03, t: 'A', k: 'web', v: { port: 'local', fresh: true } }, { at: 0.3, t: 'sw', k: 'web', v: { port: 'A·eno1 (no LAG)', fresh: true } }, { at: 0.05, t: 'hA', k: 'web', v: 'eno1' }],
           dec: [D('warn', 'Node A lacp', 'all members DEFAULTED + fallback_ab → attached, bond mode <b>active-backup</b>, active = eno1')] },
         { clock: 'T+120 s', title: 'Switch configured → LACP converges, all four attach', doc: 'LACP bonding', dur: 4200,
@@ -350,13 +353,13 @@
         { clock: 'T+0.1 s', title: 'Flows on the detached members are dropped until they rehash', doc: 'Bond packet output / input', dur: 4600,
           body: `<p>Until OVS has processed the change, frames hashed to <code>eno3</code> are still sent — and the switch, with the port out of the bundle, drops them or returns nothing. Inbound frames the switch still delivers on eno3/eno4 are dropped by OVS: "we drop packets on disabled members".</p><p>Then the buckets move to <code>eno1/eno2</code>. The bond is up, with <b>half its links</b> and all traffic on one switch.</p>`,
           vm: 'B', pl: 'fail',
-          frames: [{ pts: up('B', 'web', 'eno3').slice(0, 6), k: 'uni', t0: 0.05, t1: 0.35, end: 'drop', note: 'not attached', label: 'vm-web → gw' }, { pts: [CORE, SW.sw2, [HOST.B.att.eno4, ATT_Y], [HOST.B.px.eno4, PORT_Y], [HOST.B.px.eno4, ADM_Y]], k: 'uni', t0: 0.15, t1: 0.5, end: 'drop', note: 'disabled member' }, { pts: join(up('B', 'web', 'eno2'), toCore('sw1')), k: 'uni', t0: 0.55, t1: 0.95, end: 'ok', label: 'vm-web → gw' }],
+          frames: [{ pts: up('B', 'web', 'eno3').slice(0, 6), k: 'uni', t0: 0.05, t1: 0.35, end: 'drop', note: 'not attached', label: 'vm-web → gw' }, { pts: viaCore([SW.sw2, [HOST.B.att.eno4, ATT_Y], [HOST.B.px.eno4, PORT_Y], [HOST.B.px.eno4, ADM_Y]]), k: 'uni', t0: 0.15, t1: 0.5, end: 'drop', note: 'disabled member' }, { pts: join(up('B', 'web', 'eno2'), toCore('sw1')), k: 'uni', t0: 0.55, t1: 0.95, end: 'ok', label: 'vm-web → gw' }],
           up: [{ at: 0.5, t: 'hB', k: 'web', v: 'eno2+eno1' }, { at: 0.5, t: 'hB', k: 'pB', v: 'eno1+eno2' }, { at: 0.5, t: 'hA', k: 'pA', v: 'eno1+eno2' }, { at: 0.5, t: 'hA', k: 'x', v: 'eno1' }],
           dec: [D('drop', 'Node B · eno4 (input)', 'member not enabled → <b>BV_DROP</b>'), D('warn', 'Node B bond0 · output', 'buckets on eno3/eno4 reassigned to <b>eno1/eno2</b>')] },
         { clock: 'T+1 s', title: 'Degraded but up — and silent about it', doc: 'Risk', dur: 4200,
           body: `<p>Everything works at 50% capacity through sw1 alone. Nothing in Kubernetes is unhealthy; only <code>ovs-appctl lacp/show</code> or <code>bond/show</code> reveals two members "not attached". If sw1 now fails too, the lead flips to eno3 (partner sw2) and traffic moves — after LACP timers (#3).</p><p><b>Mitigate:</b> monitor LACP state on both ends, alert on MLAG peer-link health, and make sure the MLAG system-ID is identical on both peers.</p>`,
           vm: 'B', pl: 'fail',
-          frames: [{ pts: [CORE].concat(dn('sw1', 'B', 'eno1', 'web')), k: 'uni', t0: 0.05, t1: 0.5, end: 'ok', label: 'gw → vm-web' }, { pts: uniUp('B', 'pods', 'eno2'), k: 'pod', t0: 0.1, t1: 0.5, end: 'ok' }, { pts: uniUp('A', 'pods', 'eno1'), k: 'pod', t0: 0.3, t1: 0.7, end: 'ok' }] },
+          frames: [{ pts: viaCore(dn('sw1', 'B', 'eno1', 'web')), k: 'uni', t0: 0.05, t1: 0.5, end: 'ok', label: 'gw → vm-web' }, { pts: uniUp('B', 'pods', 'eno2'), k: 'pod', t0: 0.1, t1: 0.5, end: 'ok' }, { pts: uniUp('A', 'pods', 'eno1'), k: 'pod', t0: 0.3, t1: 0.7, end: 'ok' }] },
       ],
     },
     {
@@ -688,8 +691,8 @@
         if (fr.dash) dyn.append(el('circle', { cx: p[0], cy: p[1], r: 10, fill: 'none', stroke: 'var(--color-warning)', 'stroke-dasharray': '3 2' }));
         dyn.append(el('circle', { cx: p[0], cy: p[1], r: 7, class: `frame ${fr.k}` }));
         if (fr.label && f < 0.82) {
-          const left = p[0] > 820;
-          const tx = el('text', { x: p[0] + (left ? -12 : 12), y: p[1] - 10, 'text-anchor': left ? 'end' : 'start', class: 'mono', style: `fill: var(--color-${fr.k === 'uni' ? 'primary' : fr.k}); font-weight:600` }, fr.label);
+          const left = p[0] > 820, below = p[1] < 100;
+          const tx = el('text', { x: p[0] + (left ? -12 : 12), y: below ? p[1] + 24 : p[1] - 10, 'text-anchor': left ? 'end' : 'start', class: 'mono', style: `fill: var(--color-${fr.k === 'uni' ? 'primary' : fr.k}); font-weight:600` }, fr.label);
           dyn.append(tx);
         }
       } else if (fr.end) {
